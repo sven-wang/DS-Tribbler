@@ -209,7 +209,19 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 	tribListKey := util.FormatTribListKey(args.UserID)
 	postKey := util.FormatPostKey(args.UserID, timestamp)
 
-	return errors.New("not implemented")
+	// Storage design:
+	// userPostKey -> tribleIDList (list of postKeys)
+	// postKey -> content
+	err = ts.myLibstore.Put(postKey, args.Contents)
+	if err != nil {
+		return err
+	}
+	err = ts.myLibstore.AppendToList(tribListKey, postKey)
+	if err != nil {
+		return err
+	}
+	reply.Status = tribrpc.OK
+	return nil
 }
 
 func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *tribrpc.DeleteTribbleReply) error {
