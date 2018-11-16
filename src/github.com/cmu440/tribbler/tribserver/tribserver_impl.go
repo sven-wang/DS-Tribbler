@@ -3,7 +3,6 @@ package tribserver
 import (
 	"errors"
 	"fmt"
-	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"github.com/cmu440/tribbler/util"
 	"net"
 	"net/http"
@@ -11,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cmu440/tribbler/rpc/tribrpc"
 	"github.com/cmu440/tribbler/libstore"
+	"github.com/cmu440/tribbler/rpc/tribrpc"
 )
 
 type tribServer struct {
@@ -64,15 +63,15 @@ func (ts *tribServer) checkUserExistence(userID string) (bool, error) {
 	userKey := util.FormatUserKey(userID)
 	// Do a Get on the Libstore instance to check duplicate key
 	_, err := ts.myLibstore.Get(userKey)
-	if err != nil && err.Error() != "KeyNotFound" {
-		return false, err
+	if err != nil {
+		// TODO: How to determine if a key exists?
+		if err.Error() != "KeyNotFound" {
+			return false, err
+		} else {
+			return false, nil
+		}
 	}
-	exist := true
-	// TODO: How to determine if a key exists?
-	if err != nil && err.Error() == "KeyNotFound" {
-		exist = false
-	}
-	return exist, nil
+	return true, nil
 }
 
 func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.CreateUserReply) error {
@@ -227,15 +226,32 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 }
 
 func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *tribrpc.DeleteTribbleReply) error {
-	content, err := ts.myLibstore.Get(args.PostKey)
+	// Check whether the post exists or not
+	_, err := ts.myLibstore.Get(args.PostKey)
 	if err != nil {
-		return err
+		if err.Error() != "KeyNotFound" {
+			return err
+		} else {
+			reply.Status = tribrpc.NoSuchPost
+			return nil
+		}
 	}
-	if content == nil {
 
+	err = ts.myLibstore.Delete(args.PostKey)
+	if err != nil {
+		if err.Error() != "KeyNotFound" {
+			return err
+		} else {
+			reply.Status = tribrpc.NoSuchPost
+			return nil
+		}
 	}
 
-	return errors.New("not implemented")
+	userKey := util.FormatUserKey(args.UserID)
+	tribbleList, err := ts.myLibstore.GetList(userKey)
+
+	reply.Status = tribrpc.OK
+	return nil
 }
 
 func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
