@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
+	"github.com/cmu440/tribbler/libstore"
 )
 
 type tribServer struct {
@@ -34,7 +34,7 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	}
 	tribServer.myLibstore = libstoreInstance
 
-	addr := strings.Split(myHostPort, ":") // addr = (ip, port)
+	addr := strings.Split(myHostPort, ":")		// addr = (ip, port)
 	// Create the server socket that will listen for incoming RPCs.
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", addr[1]))
 	if err != nil {
