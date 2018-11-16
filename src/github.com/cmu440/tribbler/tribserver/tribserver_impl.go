@@ -3,6 +3,7 @@ package tribserver
 import (
 	"errors"
 	"fmt"
+	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"github.com/cmu440/tribbler/util"
 	"net"
 	"net/http"
@@ -62,14 +63,14 @@ func (ts *tribServer) checkUserExistence(userID string) (bool, error) {
 	// Format user key
 	userKey := util.FormatUserKey(userID)
 	// Do a Get on the Libstore instance to check duplicate key
-	val, err := ts.myLibstore.Get(userKey)
-	if err != nil {
+	_, err := ts.myLibstore.Get(userKey)
+	if err != nil && err.Error() != "KeyNotFound" {
 		return false, err
 	}
-	exist := false
+	exist := true
 	// TODO: How to determine if a key exists?
-	if len(val) > 0 {
-		exist = true
+	if err != nil && err.Error() == "KeyNotFound" {
+		exist = false
 	}
 	return exist, nil
 }
@@ -221,10 +222,19 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 		return err
 	}
 	reply.Status = tribrpc.OK
+	reply.PostKey = postKey
 	return nil
 }
 
 func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *tribrpc.DeleteTribbleReply) error {
+	content, err := ts.myLibstore.Get(args.PostKey)
+	if err != nil {
+		return err
+	}
+	if content == nil {
+
+	}
+
 	return errors.New("not implemented")
 }
 
