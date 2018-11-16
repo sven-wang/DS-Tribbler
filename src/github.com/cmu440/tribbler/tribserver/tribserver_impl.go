@@ -210,7 +210,7 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 	postKey := util.FormatPostKey(args.UserID, timestamp)
 
 	// Storage design:
-	// userPostKey -> tribleIDList (list of postKeys)
+	// userPostKey -> tribbleIDList (list of postKeys)
 	// postKey -> content
 	err = ts.myLibstore.Put(postKey, args.Contents)
 	if err != nil {
