@@ -15,7 +15,6 @@ import (
 )
 
 type tribServer struct {
-	// TODO: implement this!
 	myLibstore libstore.Libstore
 }
 
@@ -34,7 +33,7 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	}
 	tribServer.myLibstore = libStoreInstance
 
-	addr := strings.Split(myHostPort, ":")		// addr = (ip, port)
+	addr := strings.Split(myHostPort, ":") // addr = (ip, port)
 	// Create the server socket that will listen for incoming RPCs.
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", addr[1]))
 	if err != nil {
@@ -46,6 +45,9 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO: User the same HTTP handler for TribServer and Libstrore (final checkpoint)
+	// rpc.RegisterName("LeaseCallbacks", librpc.Wrap(libStoreInstance))
 
 	// Setup the HTTP handler that will server incoming RPCs and
 	// serve requests in a background goroutine.

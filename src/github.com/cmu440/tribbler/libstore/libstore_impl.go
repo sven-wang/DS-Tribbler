@@ -2,12 +2,22 @@ package libstore
 
 import (
 	"errors"
+	"net"
+	"net/rpc"
+	"strings"
+	"time"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 )
 
+// The Libstore instance uses an 'rpc.Client' in order to perform RPCs to the
+// Master StorageServer.
 type libstore struct {
-	// TODO: implement this!
+	// TODO: Add hash table as the cache here for final checkpoint
+	msClient       *rpc.Client       // RPC client to the Master StorageServer
+	storageServers []storagerpc.Node // List of storage servers that are in the hash ring
+	mode           LeaseMode         // Debugging flag
+	myHostPort     string
 }
 
 // NewLibstore creates a new instance of a TribServer's libstore. masterServerHostPort
@@ -35,7 +45,41 @@ type libstore struct {
 // need to create a brand new HTTP handler to serve the requests (the Libstore may
 // simply reuse the TribServer's HTTP handler since the two run in the same process).
 func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libstore, error) {
-	return nil, errors.New("not implemented")
+	libStoreInstance := new(libstore)
+	libStoreInstance.mode = mode
+	libStoreInstance.myHostPort = myHostPort
+
+	// Contact the master server to know a list of available storage servers via GetServers RPC
+	serverPort := strings.Split(myHostPort, ":")[1]
+	client, err := rpc.DialHTTP("tcp", net.JoinHostPort(masterServerHostPort, serverPort))
+	if err != nil {
+		return nil, err
+	}
+	libStoreInstance.msClient = client
+	args := &storagerpc.GetServersArgs{}
+	reply := &storagerpc.GetServersReply{}
+	// Retry no more than 5 times
+	retryCnt := 0
+	for retryCnt < 5 {
+		err = client.Call("StorageServer.GetServers", args, reply)
+		if err != nil {
+			return nil, err
+		}
+		if reply.Status == storagerpc.NotReady {
+			time.Sleep(1 * time.Second)
+		} else if reply.Status == storagerpc.OK {
+			libStoreInstance.storageServers = reply.Servers
+			break
+		}
+		retryCnt++
+	}
+
+	if retryCnt == 5 {
+		return nil, errors.New("storage servers took too long to get ready")
+	}
+
+	// TODO: anything else?
+	return libStoreInstance, nil
 }
 
 func (ls *libstore) Get(key string) (string, error) {
