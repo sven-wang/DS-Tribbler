@@ -20,12 +20,32 @@ const (
 )
 
 type storageServer struct {
-	role       Role                       // Role of this storage server - MASTER or SLAVE
-	registerChan chan storagerpc.Node     // Channel used for register servers
-	mux			sync.Mutex				  // Lock for this storage server
-	numNodes   int						  // Number of servers in the hash ring
-	allServers map[string]storagerpc.Node // All the storage servers in the system
-	virtualIDs []uint32                   // Virtual IDs assigned to this server
+	role         Role                       // Role of this storage server - MASTER or SLAVE
+	registerChan chan storagerpc.Node       // Channel used for register servers
+	mux          sync.Mutex                 // Lock for this storage server
+	numNodes     int                        // Number of servers in the hash ring
+	allServers   map[string]storagerpc.Node // All the storage servers in the system
+	virtualIDs   []uint32                   // Virtual IDs assigned to this server
+
+	// Hash tables for this server
+	stringTable map[string]string
+	listTable   map[string][]string
+
+	// Channels
+	getRequestChan        chan storagerpc.GetArgs
+	getReplyChan          chan storagerpc.GetReply
+	deleteRequestChan     chan storagerpc.DeleteArgs
+	deleteReplyChan       chan storagerpc.DeleteReply
+	getListRequestChan    chan storagerpc.GetArgs
+	getListReplyChan      chan storagerpc.GetListReply
+	putRequestChan        chan storagerpc.PutArgs
+	putReplyChan          chan storagerpc.PutReply
+	appendListRequestChan chan storagerpc.PutArgs
+	appendListReplyChan   chan storagerpc.PutReply
+	removeListRequestChan chan storagerpc.PutArgs
+	removeListReplyChan   chan storagerpc.PutReply
+
+	// TODO: add stuff related to lease for the final checkpoint
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -41,6 +61,21 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.virtualIDs = virtualIDs
 	ss.numNodes = numNodes
 	ss.allServers = make(map[string]storagerpc.Node)
+	ss.stringTable = make(map[string]string)
+	ss.listTable = make(map[string][]string)
+	// Init channels
+	ss.getRequestChan = make(chan storagerpc.GetArgs)
+	ss.getReplyChan = make(chan storagerpc.GetReply)
+	ss.deleteRequestChan = make(chan storagerpc.DeleteArgs)
+	ss.deleteReplyChan = make(chan storagerpc.DeleteReply)
+	ss.getListRequestChan = make(chan storagerpc.GetArgs)
+	ss.getListReplyChan = make(chan storagerpc.GetListReply)
+	ss.putRequestChan = make(chan storagerpc.PutArgs)
+	ss.putReplyChan = make(chan storagerpc.PutReply)
+	ss.appendListRequestChan = make(chan storagerpc.PutArgs)
+	ss.appendListReplyChan = make(chan storagerpc.PutReply)
+	ss.removeListRequestChan = make(chan storagerpc.PutArgs)
+	ss.removeListReplyChan = make(chan storagerpc.PutReply)
 
 	// Create the server socket that will listen for incoming RPCs.
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -59,7 +94,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	rpc.HandleHTTP()
 	go http.Serve(listener, nil)
 
-	// TODO: Own IP address?
 	ownHostAddr := net.JoinHostPort("localhost", strconv.Itoa(port))
 	// If the server is the MASTER server
 	if len(masterServerHostPort) == 0 {
@@ -153,36 +187,93 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-	return errors.New("not implemented")
+	// TODO: Check if this is the correct server to serve this request
+	ss.getRequestChan <- *args
+	*reply = <-ss.getReplyChan
+	return nil
 }
 
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
-	return errors.New("not implemented")
+	// TODO: Check if this is the correct server to serve this request
+	ss.deleteRequestChan <- *args
+	*reply = <-ss.deleteReplyChan
+	return nil
 }
 
 func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
-	return errors.New("not implemented")
+	// TODO: Check if this is the correct server to serve this request
+	ss.getListRequestChan <- *args
+	*reply = <-ss.getListReplyChan
+	return nil
 }
 
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	// TODO: Check if this is the correct server to serve this request
+	ss.putRequestChan <- *args
+	*reply = <-ss.putReplyChan
+	return nil
 }
 
 func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	// TODO: Check if this is the correct server to serve this request
+	ss.appendListRequestChan <- *args
+	*reply = <-ss.appendListReplyChan
+	return nil
 }
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
+	// TODO: Check if this is the correct server to serve this request
+
 	return errors.New("not implemented")
 }
 
 //
-// Main routine of the storage server that handles
+// Main routine of the storage server that handles multiple storage requests
 //
 func (ss *storageServer) MainRoutine() {
 	for {
 		select {
+		case args := <-ss.getRequestChan:
+			reply := storagerpc.GetReply{}
+			if val, ok := ss.stringTable[args.Key]; ok {
+				reply.Status = storagerpc.OK
+				reply.Value = val
+				// TODO: Add lease stuff for the final checkpoint
+			} else {
+				reply.Status = storagerpc.KeyNotFound
+			}
+			ss.getReplyChan <- reply
+		case args := <-ss.deleteRequestChan:
+			reply := storagerpc.DeleteReply{}
+			if _, ok := ss.stringTable[args.Key]; ok {
+				reply.Status = storagerpc.OK
+				delete(ss.stringTable, args.Key)
+				// TODO: Add revoke for the final checkpoint
+			} else {
+				reply.Status = storagerpc.KeyNotFound
+			}
+			ss.deleteReplyChan <- reply
+		case args := <-ss.getListRequestChan:
+			reply := storagerpc.GetListReply{}
+			if list, ok := ss.listTable[args.Key]; ok {
+				reply.Status = storagerpc.OK
+				// TODO: reference copy OK here?
+				reply.Value = list
+				// TODO: Add lease stuff for the final checkpoint
+			} else {
+				reply.Status = storagerpc.KeyNotFound
+			}
+			ss.getListReplyChan <- reply
+		case args := <-ss.putRequestChan:
+			reply := storagerpc.PutReply{}
+			ss.stringTable[args.Key] = args.Value
+			reply.Status = storagerpc.OK
+			ss.putReplyChan <- reply
+		case args := <-ss.appendListRequestChan:
+			reply := storagerpc.PutReply{}
+			for _, val := range ss.listTable[args.Key] {
 
+			}
 		}
 	}
 }
