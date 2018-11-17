@@ -3,7 +3,6 @@ package storageserver
 import (
 	"fmt"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
-	"log"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -102,19 +101,21 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 
 		// MASTER registers itself first
 		ss.allServers[ownHostAddr] = storagerpc.Node{HostPort: ownHostAddr, VirtualIDs: virtualIDs}
-		for {
-			select {
-			case newNode := <-ss.registerChan:
-				ss.mux.Lock()
-				if _, ok := ss.allServers[newNode.HostPort]; !ok {
-					ss.allServers[newNode.HostPort] = newNode
-					// All servers have registered
-					if len(ss.allServers) == ss.numNodes {
-						ss.mux.Unlock()
-						break
+		if numNodes > 1 {
+			for {
+				select {
+				case newNode := <-ss.registerChan:
+					ss.mux.Lock()
+					if _, ok := ss.allServers[newNode.HostPort]; !ok {
+						ss.allServers[newNode.HostPort] = newNode
+						// All servers have registered
+						if len(ss.allServers) == ss.numNodes {
+							ss.mux.Unlock()
+							break
+						}
 					}
+					ss.mux.Unlock()
 				}
-				ss.mux.Unlock()
 			}
 		}
 	} else {
@@ -147,7 +148,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	}
 
 	// Start the main routine after setup
-	log.Println("Starting the main routine after setup")
 	go ss.MainRoutine()
 	return ss, nil
 }
@@ -188,7 +188,6 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-	log.Println("ss.Get")
 	// TODO: Check if this is the correct server to serve this request
 	ss.getRequestChan <- *args
 	*reply = <-ss.getReplyChan
@@ -210,7 +209,6 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 }
 
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	log.Println("ss.Put")
 	// TODO: Check if this is the correct server to serve this request
 	ss.putRequestChan <- *args
 	*reply = <-ss.putReplyChan
@@ -236,9 +234,7 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 //
 func (ss *storageServer) MainRoutine() {
 	for {
-		log.Println("MainRoutine for loop")
 		select {
-
 		case args := <-ss.getRequestChan:
 			reply := storagerpc.GetReply{}
 			if val, ok := ss.stringTable[args.Key]; ok {
@@ -281,17 +277,21 @@ func (ss *storageServer) MainRoutine() {
 			if _, ok := ss.listTable[args.Key]; !ok {
 				ss.listTable[args.Key] = nil
 			}
+			existFlag := false
 			for _, val := range ss.listTable[args.Key] {
 				if val == args.Value {
 					reply.Status = storagerpc.ItemExists
 					ss.appendListReplyChan <- reply
-					continue
+					existFlag = true
+					break
 				}
 			}
 			// TODO: Add revoke for the final checkpoint
-			ss.listTable[args.Key] = append(ss.listTable[args.Key], args.Value)
-			reply.Status = storagerpc.OK
-			ss.appendListReplyChan <- reply
+			if !existFlag {
+				ss.listTable[args.Key] = append(ss.listTable[args.Key], args.Value)
+				reply.Status = storagerpc.OK
+				ss.appendListReplyChan <- reply
+			}
 		case args := <-ss.removeListRequestChan:
 			reply := storagerpc.PutReply{}
 			// TODO: Whether this choice is correct?
