@@ -45,9 +45,9 @@ type libstore struct {
 // need to create a brand new HTTP handler to serve the requests (the Libstore may
 // simply reuse the TribServer's HTTP handler since the two run in the same process).
 func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libstore, error) {
-	libStoreInstance := new(libstore)
-	libStoreInstance.mode = mode
-	libStoreInstance.myHostPort = myHostPort
+	ls := new(libstore)
+	ls.mode = mode
+	ls.myHostPort = myHostPort
 
 	// Contact the master server to know a list of available storage servers via GetServers RPC
 	serverPort := strings.Split(myHostPort, ":")[1]
@@ -55,7 +55,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	if err != nil {
 		return nil, err
 	}
-	libStoreInstance.msClient = client
+	ls.msClient = client
 	args := &storagerpc.GetServersArgs{}
 	reply := &storagerpc.GetServersReply{}
 	// Retry no more than 5 times
@@ -68,7 +68,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 		if reply.Status == storagerpc.NotReady {
 			time.Sleep(1 * time.Second)
 		} else if reply.Status == storagerpc.OK {
-			libStoreInstance.storageServers = reply.Servers
+			ls.storageServers = reply.Servers
 			break
 		}
 		retryCnt++
@@ -79,7 +79,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	}
 
 	// TODO: anything else?
-	return libStoreInstance, nil
+	return ls, nil
 }
 
 func (ls *libstore) Get(key string) (string, error) {

@@ -1,6 +1,7 @@
 package tribserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/cmu440/tribbler/util"
 	"net"
@@ -25,13 +26,13 @@ type tribServer struct {
 //
 // For hints on how to properly setup RPC, see the rpc/tribrpc package.
 func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) {
-	tribServer := new(tribServer)
+	ts := new(tribServer)
 	// TODO: Change lease level for final checkpoint
 	libStoreInstance, err := libstore.NewLibstore(masterServerHostPort, myHostPort, libstore.Never)
 	if err != nil {
 		return nil, err
 	}
-	tribServer.myLibstore = libStoreInstance
+	ts.myLibstore = libStoreInstance
 
 	addr := strings.Split(myHostPort, ":") // addr = (ip, port)
 	// Create the server socket that will listen for incoming RPCs.
@@ -41,7 +42,7 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	}
 
 	// Wrap the tribServer before registering it for RPC.
-	err = rpc.RegisterName("TribServer", tribrpc.Wrap(tribServer))
+	err = rpc.RegisterName("TribServer", tribrpc.Wrap(ts))
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +55,7 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	rpc.HandleHTTP()
 	go http.Serve(listener, nil)
 
-	return tribServer, nil
+	return ts, nil
 }
 
 //
@@ -207,14 +208,16 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 		return nil
 	}
 
-	timestamp := time.Now().UnixNano()
+	timestamp := time.Now()
 	tribListKey := util.FormatTribListKey(args.UserID)
-	postKey := util.FormatPostKey(args.UserID, timestamp)
+	postKey := util.FormatPostKey(args.UserID, timestamp.UnixNano())
 
+	tribble := tribrpc.Tribble{UserID: args.UserID, Contents: args.Contents, Posted: timestamp}
 	// Storage design:
 	// userPostKey -> tribbleIDList (list of postKeys)
-	// postKey -> content
-	err = ts.myLibstore.Put(postKey, args.Contents)
+	// postKey -> Tribble
+	bytes, _ := json.Marshal(tribble)
+	err = ts.myLibstore.Put(postKey, string(bytes))
 	if err != nil {
 		return err
 	}
@@ -286,7 +289,7 @@ func (ts *tribServer) GetTribblesByList(userID string, tribList []string) []trib
 	var returnList []tribrpc.Tribble
 	for i := len(tribList) - 1; i >= 0; i-- {
 		curPostKey := tribList[i]
-		content, err := ts.myLibstore.Get(curPostKey)
+		data, err := ts.myLibstore.Get(curPostKey)
 		// If you get a non-nil error when you call Get to get some particular Tribble, you can
 		// ignore this Tribble
 		if err != nil {
@@ -294,9 +297,9 @@ func (ts *tribServer) GetTribblesByList(userID string, tribList []string) []trib
 		}
 
 		// Build and append the Tribble to the reply list
-		lastIndex := strings.LastIndex(curPostKey, "_")
-		postTime, _ := time.Parse(curPostKey[5:lastIndex], time.UnixDate)
-		returnList = append(returnList, tribrpc.Tribble{UserID: userID, Contents: content, Posted: postTime})
+		tribble := tribrpc.Tribble{}
+		json.Unmarshal([]byte(data), &tribble)
+		returnList = append(returnList, tribble)
 	}
 
 	// Sort the returnList based on post timestamp (reverse chronological order)
