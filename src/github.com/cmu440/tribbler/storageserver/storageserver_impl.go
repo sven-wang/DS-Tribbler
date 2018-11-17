@@ -102,14 +102,18 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 			if reply.Status == storagerpc.NotReady {
 				time.Sleep(1 * time.Second)
 			} else if reply.Status == storagerpc.OK {
+				ss.mux.Lock()
 				for _, nodeInfo := range reply.Servers {
 					ss.allServers[nodeInfo.HostPort] = nodeInfo
 				}
+				ss.mux.Unlock()
 				break
 			}
 		}
 	}
 
+	// Start the main routine after setup
+	go ss.MainRoutine()
 	return ss, nil
 }
 
@@ -132,7 +136,20 @@ func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *st
 }
 
 func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *storagerpc.GetServersReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	if len(ss.allServers) == ss.numNodes {
+		reply.Status = storagerpc.OK
+		var registeredServers []storagerpc.Node
+		for _, nodeInfo := range ss.allServers {
+			registeredServers = append(registeredServers, nodeInfo)
+		}
+		reply.Servers = registeredServers
+		ss.mux.Unlock()
+	} else {
+		ss.mux.Unlock()
+		reply.Status = storagerpc.NotReady
+	}
+	return nil
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
@@ -157,4 +174,15 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	return errors.New("not implemented")
+}
+
+//
+// Main routine of the storage server that handles
+//
+func (ss *storageServer) MainRoutine() {
+	for {
+		select {
+
+		}
+	}
 }
