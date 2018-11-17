@@ -271,6 +271,10 @@ func (ss *storageServer) MainRoutine() {
 			ss.putReplyChan <- reply
 		case args := <-ss.appendListRequestChan:
 			reply := storagerpc.PutReply{}
+			// AppendToList will always be called after user existence check
+			if _, ok := ss.listTable[args.Key]; !ok {
+				ss.listTable[args.Key] = nil
+			}
 			for _, val := range ss.listTable[args.Key] {
 				if val == args.Value {
 					reply.Status = storagerpc.ItemExists
@@ -284,6 +288,12 @@ func (ss *storageServer) MainRoutine() {
 			ss.appendListReplyChan <- reply
 		case args := <-ss.removeListRequestChan:
 			reply := storagerpc.PutReply{}
+			// TODO: Whether this choice is correct?
+			if _, ok := ss.listTable[args.Key]; !ok {
+				reply.Status = storagerpc.OK
+				ss.removeListReplyChan <- reply
+				continue
+			}
 			targetIdx := -1
 			for idx, val := range ss.listTable[args.Key] {
 				if val == args.Value {
