@@ -1,7 +1,6 @@
 package storageserver
 
 import (
-	"errors"
 	"fmt"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"net"
@@ -223,8 +222,9 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	// TODO: Check if this is the correct server to serve this request
-
-	return errors.New("not implemented")
+	ss.removeListRequestChan <- *args
+	*reply = <-ss.removeListReplyChan
+	return nil
 }
 
 //
@@ -272,8 +272,33 @@ func (ss *storageServer) MainRoutine() {
 		case args := <-ss.appendListRequestChan:
 			reply := storagerpc.PutReply{}
 			for _, val := range ss.listTable[args.Key] {
-
+				if val == args.Value {
+					reply.Status = storagerpc.ItemExists
+					continue
+				}
 			}
+			// TODO: Add revoke for the final checkpoint
+			ss.listTable[args.Key] = append(ss.listTable[args.Key], args.Value)
+			reply.Status = storagerpc.OK
+			ss.appendListReplyChan <- reply
+		case args := <-ss.removeListRequestChan:
+			reply := storagerpc.PutReply{}
+			targetIdx := -1
+			for idx, val := range ss.listTable[args.Key] {
+				if val == args.Value {
+					targetIdx = idx
+					break
+				}
+			}
+			if targetIdx == -1 {
+				reply.Status = storagerpc.ItemNotFound
+			} else {
+				ss.listTable[args.Key] = append(ss.listTable[args.Key][:targetIdx],
+					ss.listTable[args.Key][targetIdx+1:]...)
+				reply.Status = storagerpc.OK
+				// TODO: Add revoke for the final checkpoint
+			}
+			ss.removeListReplyChan <- reply
 		}
 	}
 }
