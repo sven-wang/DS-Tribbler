@@ -60,7 +60,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	reply := &storagerpc.GetServersReply{}
 	// Retry no more than 5 times
 	retryCnt := 0
-	for retryCnt < 5 {
+	for retryCnt < 6 {
 		err = client.Call("StorageServer.GetServers", args, reply)
 		if err != nil {
 			return nil, err
