@@ -83,7 +83,17 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 }
 
 func (ls *libstore) Get(key string) (string, error) {
-	return "", errors.New("not implemented")
+	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
+	reply := &storagerpc.GetReply{}
+	err := ls.msClient.Call("StorageServer.Get", args, reply)
+	if err != nil {
+		return "", err
+	}
+	if reply.Status == storagerpc.KeyNotFound {
+		err = errors.New("KeyNotFound")
+		return "", err
+	}
+	return reply.Value, nil
 }
 
 func (ls *libstore) Put(key, value string) error {
