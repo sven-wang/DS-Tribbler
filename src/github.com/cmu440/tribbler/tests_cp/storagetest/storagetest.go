@@ -98,8 +98,11 @@ func (st *storageTester) Delete(key string) (*storagerpc.DeleteReply, error) {
 }
 
 func (st *storageTester) Get(key string, wantlease bool) (*storagerpc.GetReply, error) {
+
 	args := &storagerpc.GetArgs{Key: key, WantLease: wantlease, HostPort: st.myhostport}
 	var reply storagerpc.GetReply
+
+	println("storageTester.Get calling rpc")
 	err := st.srv.Call("StorageServer.Get", args, &reply)
 	return &reply, err
 }
@@ -267,22 +270,30 @@ func testInitStorageServers() {
 
 // Get keys without wantlease
 func testPutGetWithoutLease() {
+	fmt.Println("testPutGetWithoutLease...")
 	// get an invalid key
 	replyG, err := st.Get("nullkey:1", false)
 	if checkErrorStatus(err, replyG.Status, storagerpc.KeyNotFound) {
 		return
 	}
 
+	fmt.Println("testPutGetWithoutLease 1")
+
 	replyP, err := st.Put("keyputget:1", "value")
 	if checkErrorStatus(err, replyP.Status, storagerpc.OK) {
 		return
 	}
+
+	fmt.Println("testPutGetWithoutLease 2")
 
 	// without asking for a lease
 	replyG, err = st.Get("keyputget:1", false)
 	if checkErrorStatus(err, replyG.Status, storagerpc.OK) {
 		return
 	}
+
+	fmt.Println("testPutGetWithoutLease 3")
+
 	if replyG.Value != "value" {
 		LOGE.Println("FAIL: got wrong value")
 		failCount++
