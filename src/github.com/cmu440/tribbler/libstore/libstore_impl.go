@@ -83,37 +83,102 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 }
 
 func (ls *libstore) Get(key string) (string, error) {
+	// TODO: Add lease caching for final checkpoint
 	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
 	reply := &storagerpc.GetReply{}
+	// TODO: Add request routing for final checkpoint
 	err := ls.msClient.Call("StorageServer.Get", args, reply)
 	if err != nil {
 		return "", err
 	}
 	if reply.Status == storagerpc.KeyNotFound {
-		err = errors.New("KeyNotFound")
-		return "", err
+		return "", errors.New("KeyNotFound")
+	} else if reply.Status != storagerpc.OK {
+		return "", errors.New("get fails")
 	}
 	return reply.Value, nil
 }
 
 func (ls *libstore) Put(key, value string) error {
-	return errors.New("not implemented")
+	args := &storagerpc.PutArgs{Key: key, Value: value}
+	reply := &storagerpc.PutReply{}
+	// TODO: Add request routing for final checkpoint
+	err := ls.msClient.Call("StorageServer.Put", args, reply)
+	if err != nil {
+		return err
+	}
+	if reply.Status != storagerpc.OK {
+		return errors.New("put fails")
+	}
+	return nil
 }
 
 func (ls *libstore) Delete(key string) error {
-	return errors.New("not implemented")
+	args := &storagerpc.DeleteArgs{Key: key}
+	reply := &storagerpc.DeleteReply{}
+	// TODO: Add request routing for final checkpoint
+	err := ls.msClient.Call("StorageServer.Delete", args, reply)
+	if err != nil {
+		return err
+	}
+
+	if reply.Status == storagerpc.KeyNotFound {
+		return errors.New("KeyNotFound")
+	} else if reply.Status != storagerpc.OK {
+		return errors.New("delete fails")
+	}
+	return nil
 }
 
 func (ls *libstore) GetList(key string) ([]string, error) {
-	return nil, errors.New("not implemented")
+	// TODO: Add lease caching for final checkpoint
+	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
+	reply := &storagerpc.GetListReply{}
+	// TODO: Add request routing for final checkpoint
+	err := ls.msClient.Call("StorageServer.GetList", args, reply)
+	if err != nil {
+		return nil, err
+	}
+	// TODO: Whether this is the right choice?
+	if reply.Status != storagerpc.KeyNotFound && reply.Status != storagerpc.OK {
+		return nil, errors.New("get list fails")
+	} else {
+		return reply.Value, nil
+	}
 }
 
 func (ls *libstore) RemoveFromList(key, removeItem string) error {
-	return errors.New("not implemented")
+	args := &storagerpc.PutArgs{Key: key, Value: removeItem}
+	reply := &storagerpc.PutReply{}
+	// TODO: Add request routing for final checkpoint
+	err := ls.msClient.Call("StorageServer.RemoveFromList", args, reply)
+	if err != nil {
+		return err
+	}
+	if reply.Status == storagerpc.ItemNotFound {
+		// TODO: What is the correct behavior here for this scenario?
+		return errors.New("ItemNotFound")
+	} else if reply.Status != storagerpc.OK {
+		return errors.New("remove from list fails")
+	}
+	return nil
 }
 
 func (ls *libstore) AppendToList(key, newItem string) error {
-	return errors.New("not implemented")
+	args := &storagerpc.PutArgs{Key: key, Value: newItem}
+	reply := &storagerpc.PutReply{}
+	// TODO: Add request routing for final checkpoint
+	err := ls.msClient.Call("StorageServer.AppendToList", args, reply)
+	if err != nil {
+		return err
+	}
+
+	if reply.Status == storagerpc.ItemExists {
+		return errors.New("ItemExists")
+	} else if reply.Status != storagerpc.OK {
+		return errors.New("append tto list fails")
+	}
+	return nil
 }
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {

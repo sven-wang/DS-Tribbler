@@ -87,8 +87,9 @@ func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.Cr
 		reply.Status = tribrpc.Exists
 		return nil
 	}
-	// TODO: Check what parameters are supposed to put there
-	err = ts.myLibstore.Put(args.UserID, args.UserID)
+
+	userKey := util.FormatUserKey(args.UserID)
+	err = ts.myLibstore.Put(userKey, args.UserID)
 	if err != nil {
 		return err
 	}

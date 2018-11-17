@@ -274,6 +274,7 @@ func (ss *storageServer) MainRoutine() {
 			for _, val := range ss.listTable[args.Key] {
 				if val == args.Value {
 					reply.Status = storagerpc.ItemExists
+					ss.appendListReplyChan <- reply
 					continue
 				}
 			}
