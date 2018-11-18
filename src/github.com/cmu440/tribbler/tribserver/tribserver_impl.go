@@ -2,13 +2,12 @@ package tribserver
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/cmu440/tribbler/util"
+	"math"
 	"net"
 	"net/http"
 	"net/rpc"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/cmu440/tribbler/libstore"
@@ -34,9 +33,8 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	}
 	ts.myLibstore = libStoreInstance
 
-	addr := strings.Split(myHostPort, ":") // addr = (ip, port)
 	// Create the server socket that will listen for incoming RPCs.
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", addr[1]))
+	listener, err := net.Listen("tcp", myHostPort)
 	if err != nil {
 		return nil, err
 	}
@@ -119,9 +117,14 @@ func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tri
 	userSubListKey := util.FormatSubListKey(args.UserID)
 	err = ts.myLibstore.AppendToList(userSubListKey, args.TargetUserID)
 	if err != nil {
-		return err
+		if err.Error() != "ItemExists" {
+			return err
+		} else {
+			reply.Status = tribrpc.Exists
+		}
+	} else {
+		reply.Status = tribrpc.OK
 	}
-	reply.Status = tribrpc.OK
 	return nil
 }
 
@@ -147,9 +150,14 @@ func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *
 	userSubListKey := util.FormatSubListKey(args.UserID)
 	err = ts.myLibstore.RemoveFromList(userSubListKey, args.TargetUserID)
 	if err != nil {
-		return err
+		if err.Error() != "ItemNotFound" {
+			return err
+		} else {
+			reply.Status = tribrpc.NoSuchTargetUser
+		}
+	} else {
+		reply.Status = tribrpc.OK
 	}
-	reply.Status = tribrpc.OK
 	return nil
 }
 
@@ -232,8 +240,17 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 }
 
 func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *tribrpc.DeleteTribbleReply) error {
+	exist, err := ts.CheckUserExistence(args.UserID)
+	if err != nil {
+		return err
+	}
+	if !exist {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
 	// Check whether the post exists or not
-	_, err := ts.myLibstore.Get(args.PostKey)
+	_, err = ts.myLibstore.Get(args.PostKey)
 	if err != nil {
 		if err.Error() != "KeyNotFound" {
 			return err
@@ -308,7 +325,11 @@ func (ts *tribServer) GetTribblesByList(userID string, tribList []string) []trib
 		return returnList[i].Posted.After(returnList[j].Posted)
 	})
 	// Retrieve a list of at most 100 Tribbles
-	return returnList[:100]
+	if len(returnList) > 0 {
+		return returnList[:int(math.Min(float64(len(returnList)), 100))]
+	} else {
+		return nil
+	}
 }
 
 func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
@@ -340,11 +361,13 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 		returnList = append(returnList, ts.GetTribblesByList(followingUserID, curTribList)...)
 	}
 
-	// Sort the returnList based on post timestamp (reverse chronological order)
-	sort.Slice(returnList, func(i, j int) bool {
-		return returnList[i].Posted.After(returnList[j].Posted)
-	})
 	reply.Status = tribrpc.OK
-	reply.Tribbles = returnList[:100]
+	if len(returnList) > 0 {
+		// Sort the returnList based on post timestamp (reverse chronological order)
+		sort.Slice(returnList, func(i, j int) bool {
+			return returnList[i].Posted.After(returnList[j].Posted)
+		})
+		reply.Tribbles = returnList[:int(math.Min(float64(len(returnList)), 100))]
+	}
 	return nil
 }

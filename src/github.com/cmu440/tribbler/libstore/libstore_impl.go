@@ -2,9 +2,7 @@ package libstore
 
 import (
 	"errors"
-	"net"
 	"net/rpc"
-	"strings"
 	"time"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
@@ -50,8 +48,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	ls.myHostPort = myHostPort
 
 	// Contact the master server to know a list of available storage servers via GetServers RPC
-	serverPort := strings.Split(myHostPort, ":")[1]
-	client, err := rpc.DialHTTP("tcp", net.JoinHostPort(masterServerHostPort, serverPort))
+	client, err := rpc.DialHTTP("tcp", masterServerHostPort)
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +152,8 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 	if err != nil {
 		return err
 	}
+
 	if reply.Status == storagerpc.ItemNotFound {
-		// TODO: What is the correct behavior here for this scenario?
 		return errors.New("ItemNotFound")
 	} else if reply.Status != storagerpc.OK {
 		return errors.New("remove from list fails")
@@ -176,7 +173,7 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 	if reply.Status == storagerpc.ItemExists {
 		return errors.New("ItemExists")
 	} else if reply.Status != storagerpc.OK {
-		return errors.New("append tto list fails")
+		return errors.New("append to list fails")
 	}
 	return nil
 }

@@ -20,7 +20,7 @@ const (
 
 type storageServer struct {
 	role         Role                       // Role of this storage server - MASTER or SLAVE
-	registerChan chan registerInfo       // Channel used for register servers
+	registerChan chan registerInfo          // Channel used for register servers
 	mux          sync.Mutex                 // Lock for this storage server
 	numNodes     int                        // Number of servers in the hash ring
 	allServers   map[string]storagerpc.Node // All the storage servers in the system
@@ -49,7 +49,7 @@ type storageServer struct {
 
 type registerInfo struct {
 	serverInfo storagerpc.Node
-	lenChan chan int
+	lenChan    chan int
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
