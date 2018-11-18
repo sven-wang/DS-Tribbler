@@ -20,7 +20,7 @@ const (
 
 type storageServer struct {
 	role         Role                       // Role of this storage server - MASTER or SLAVE
-	registerChan chan storagerpc.Node       // Channel used for register servers
+	registerChan chan registerInfo       // Channel used for register servers
 	mux          sync.Mutex                 // Lock for this storage server
 	numNodes     int                        // Number of servers in the hash ring
 	allServers   map[string]storagerpc.Node // All the storage servers in the system
@@ -45,6 +45,11 @@ type storageServer struct {
 	removeListReplyChan   chan storagerpc.PutReply
 
 	// TODO: add stuff related to lease for the final checkpoint
+}
+
+type registerInfo struct {
+	serverInfo storagerpc.Node
+	lenChan chan int
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -97,22 +102,26 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	// If the server is the MASTER server
 	if len(masterServerHostPort) == 0 {
 		ss.role = MASTER
-		ss.registerChan = make(chan storagerpc.Node)
+		ss.registerChan = make(chan registerInfo)
 
 		// MASTER registers itself first
+		ss.mux.Lock()
 		ss.allServers[ownHostAddr] = storagerpc.Node{HostPort: ownHostAddr, VirtualIDs: virtualIDs}
+		ss.mux.Unlock()
 		if numNodes > 1 {
 			for {
 				select {
-				case newNode := <-ss.registerChan:
+				case registerInfo := <-ss.registerChan:
+					newNode := registerInfo.serverInfo
 					ss.mux.Lock()
 					if _, ok := ss.allServers[newNode.HostPort]; !ok {
 						ss.allServers[newNode.HostPort] = newNode
-						// All servers have registered
-						if len(ss.allServers) == ss.numNodes {
-							ss.mux.Unlock()
-							break
-						}
+					}
+					registerInfo.lenChan <- len(ss.allServers)
+					// All servers have registered
+					if len(ss.allServers) == ss.numNodes {
+						ss.mux.Unlock()
+						break
 					}
 					ss.mux.Unlock()
 				}
@@ -153,18 +162,18 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 }
 
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
-	ss.mux.Lock()
-	if len(ss.allServers) == ss.numNodes {
+	lenChan := make(chan int)
+	ss.registerChan <- registerInfo{lenChan: lenChan, serverInfo: args.ServerInfo}
+	serverNum := <-lenChan
+
+	if serverNum == ss.numNodes {
 		reply.Status = storagerpc.OK
 		var registeredServers []storagerpc.Node
 		for _, nodeInfo := range ss.allServers {
 			registeredServers = append(registeredServers, nodeInfo)
 		}
 		reply.Servers = registeredServers
-		ss.mux.Unlock()
 	} else {
-		ss.mux.Unlock()
-		ss.registerChan <- args.ServerInfo
 		reply.Status = storagerpc.NotReady
 	}
 	return nil
