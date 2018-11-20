@@ -3,6 +3,8 @@ package libstore
 import (
 	"errors"
 	"net/rpc"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
@@ -12,10 +14,18 @@ import (
 // Master StorageServer.
 type libstore struct {
 	// TODO: Add hash table as the cache here for final checkpoint
-	msClient       *rpc.Client       // RPC client to the Master StorageServer
-	storageServers []storagerpc.Node // List of storage servers that are in the hash ring
-	mode           LeaseMode         // Debugging flag
-	myHostPort     string
+	mux            sync.Mutex             // Lock for the libstore instance
+	msClient       *rpc.Client            // RPC client to the Master StorageServer
+	storageServers []simpleNode           // List of storage servers that are in the hash ring
+	mode           LeaseMode              // Debugging flag
+	myHostPort     string                 // IP address of the libstore instance
+	hostToClient   map[string]*rpc.Client // Cache for the seen connections' clients
+}
+
+// Simplified Node struct - Only store one virtual ID for a server
+type simpleNode struct {
+	hostPort  string // The host:port address of the storage server node.
+	virtualID uint32 // One of the virtual IDs identifying this storage server node.
 }
 
 // NewLibstore creates a new instance of a TribServer's libstore. masterServerHostPort
@@ -46,6 +56,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	ls := new(libstore)
 	ls.mode = mode
 	ls.myHostPort = myHostPort
+	ls.hostToClient = make(map[string]*rpc.Client)
 
 	// Contact the master server to know a list of available storage servers via GetServers RPC
 	client, err := rpc.DialHTTP("tcp", masterServerHostPort)
@@ -65,7 +76,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 		if reply.Status == storagerpc.NotReady {
 			time.Sleep(1 * time.Second)
 		} else if reply.Status == storagerpc.OK {
-			ls.storageServers = reply.Servers
+			ls.storageServers = FlattenServers(reply.Servers)
 			break
 		}
 		retryCnt++
@@ -75,16 +86,37 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 		return nil, errors.New("storage servers took too long to get ready")
 	}
 
-	// TODO: anything else?
 	return ls, nil
+}
+
+//
+// Flatten the slice of storagerpc.Node to slice of simpleNode, which is order by each virtual ID
+//
+func FlattenServers(servers []storagerpc.Node) []simpleNode {
+	var flattenedServers []simpleNode
+	for _, serverInfo := range servers {
+		curHostPort := serverInfo.HostPort
+		for _, virtualID := range serverInfo.VirtualIDs {
+			flattenedServers = append(flattenedServers, simpleNode{hostPort: curHostPort, virtualID: virtualID})
+		}
+	}
+	// Sort the simpleNode list using virtualID in ascending order
+	sort.Slice(flattenedServers, func(i, j int) bool {
+		return flattenedServers[i].virtualID < flattenedServers[j].virtualID
+	})
+	return flattenedServers
 }
 
 func (ls *libstore) Get(key string) (string, error) {
 	// TODO: Add lease caching for final checkpoint
 	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
 	reply := &storagerpc.GetReply{}
-	// TODO: Add request routing for final checkpoint
-	err := ls.msClient.Call("StorageServer.Get", args, reply)
+	// Request route
+	client, err := ls.RouteServer(key)
+	if err != nil {
+		return "", err
+	}
+	err = client.Call("StorageServer.Get", args, reply)
 	if err != nil {
 		return "", err
 	}
@@ -99,8 +131,12 @@ func (ls *libstore) Get(key string) (string, error) {
 func (ls *libstore) Put(key, value string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: value}
 	reply := &storagerpc.PutReply{}
-	// TODO: Add request routing for final checkpoint
-	err := ls.msClient.Call("StorageServer.Put", args, reply)
+	// Request route
+	client, err := ls.RouteServer(key)
+	if err != nil {
+		return err
+	}
+	err = client.Call("StorageServer.Put", args, reply)
 	if err != nil {
 		return err
 	}
@@ -113,8 +149,12 @@ func (ls *libstore) Put(key, value string) error {
 func (ls *libstore) Delete(key string) error {
 	args := &storagerpc.DeleteArgs{Key: key}
 	reply := &storagerpc.DeleteReply{}
-	// TODO: Add request routing for final checkpoint
-	err := ls.msClient.Call("StorageServer.Delete", args, reply)
+	// Request route
+	client, err := ls.RouteServer(key)
+	if err != nil {
+		return err
+	}
+	err = client.Call("StorageServer.Delete", args, reply)
 	if err != nil {
 		return err
 	}
@@ -131,8 +171,12 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 	// TODO: Add lease caching for final checkpoint
 	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
 	reply := &storagerpc.GetListReply{}
-	// TODO: Add request routing for final checkpoint
-	err := ls.msClient.Call("StorageServer.GetList", args, reply)
+	// Request route
+	client, err := ls.RouteServer(key)
+	if err != nil {
+		return nil, err
+	}
+	err = client.Call("StorageServer.GetList", args, reply)
 	if err != nil {
 		return nil, err
 	}
@@ -147,8 +191,12 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 func (ls *libstore) RemoveFromList(key, removeItem string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: removeItem}
 	reply := &storagerpc.PutReply{}
-	// TODO: Add request routing for final checkpoint
-	err := ls.msClient.Call("StorageServer.RemoveFromList", args, reply)
+	// Request route
+	client, err := ls.RouteServer(key)
+	if err != nil {
+		return err
+	}
+	err = client.Call("StorageServer.RemoveFromList", args, reply)
 	if err != nil {
 		return err
 	}
@@ -164,8 +212,12 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 func (ls *libstore) AppendToList(key, newItem string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: newItem}
 	reply := &storagerpc.PutReply{}
-	// TODO: Add request routing for final checkpoint
-	err := ls.msClient.Call("StorageServer.AppendToList", args, reply)
+	// Request route
+	client, err := ls.RouteServer(key)
+	if err != nil {
+		return err
+	}
+	err = client.Call("StorageServer.AppendToList", args, reply)
 	if err != nil {
 		return err
 	}
@@ -180,4 +232,42 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
 	return errors.New("not implemented")
+}
+
+//
+// Given a key (not the hashed key), find the correct server to handle the request
+//
+func (ls *libstore) RouteServer(key string) (*rpc.Client, error) {
+	hashedKey := StoreHash(key)
+	var chosenServer = ""
+
+	// Find the proper server to serve this request. Since the virtual IDs are sorted in the storageServers list, break
+	// the loop once a virtual ID that is bigger than the hashed key is found
+	for _, serverInfo := range ls.storageServers {
+		if hashedKey < serverInfo.virtualID {
+			chosenServer = serverInfo.hostPort
+			break
+		}
+	}
+
+	// If the hashed key is bigger than every virtual ID, use the first simpleNode to serve this request
+	if len(chosenServer) == 0 {
+		chosenServer = ls.storageServers[0].hostPort
+	}
+
+	ls.mux.Lock()
+	defer ls.mux.Unlock()
+
+	// If this server is connected for the first time, build the connection and cache the client
+	if client, ok := ls.hostToClient[chosenServer]; !ok {
+		client, err := rpc.DialHTTP("tcp", chosenServer)
+		if err != nil {
+			return nil, err
+		} else {
+			ls.hostToClient[chosenServer] = client
+			return client, nil
+		}
+	} else {
+		return client, nil
+	}
 }

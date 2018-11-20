@@ -2,10 +2,12 @@ package storageserver
 
 import (
 	"fmt"
+	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"net"
 	"net/http"
 	"net/rpc"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ type storageServer struct {
 	numNodes     int                        // Number of servers in the hash ring
 	allServers   map[string]storagerpc.Node // All the storage servers in the system
 	virtualIDs   []uint32                   // Virtual IDs assigned to this server
+	myHostPort   string                     // Host address for this server
 
 	// Hash tables for this server
 	stringTable map[string]string
@@ -63,6 +66,10 @@ type registerInfo struct {
 func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualIDs []uint32) (StorageServer, error) {
 	ss := new(storageServer)
 	ss.virtualIDs = virtualIDs
+	// Sort the virtual IDs owned by this storage server in ascending order so as to ease server validation
+	sort.Slice(ss.virtualIDs, func(i, j int) bool {
+		return ss.virtualIDs[i] < ss.virtualIDs[j]
+	})
 	ss.numNodes = numNodes
 	ss.allServers = make(map[string]storagerpc.Node)
 	ss.stringTable = make(map[string]string)
@@ -81,6 +88,8 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.removeListRequestChan = make(chan storagerpc.PutArgs)
 	ss.removeListReplyChan = make(chan storagerpc.PutReply)
 
+	ownHostAddr := net.JoinHostPort("localhost", strconv.Itoa(port))
+	ss.myHostPort = ownHostAddr
 	// Create the server socket that will listen for incoming RPCs.
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -98,7 +107,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	rpc.HandleHTTP()
 	go http.Serve(listener, nil)
 
-	ownHostAddr := net.JoinHostPort("localhost", strconv.Itoa(port))
 	// If the server is the MASTER server
 	if len(masterServerHostPort) == 0 {
 		ss.role = MASTER
@@ -197,45 +205,94 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-	// TODO: Check if this is the correct server to serve this request
+	if !ss.ValidateServer(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
 	ss.getRequestChan <- *args
 	*reply = <-ss.getReplyChan
 	return nil
 }
 
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
-	// TODO: Check if this is the correct server to serve this request
+	if !ss.ValidateServer(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
 	ss.deleteRequestChan <- *args
 	*reply = <-ss.deleteReplyChan
 	return nil
 }
 
 func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
-	// TODO: Check if this is the correct server to serve this request
+	if !ss.ValidateServer(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
 	ss.getListRequestChan <- *args
 	*reply = <-ss.getListReplyChan
 	return nil
 }
 
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	// TODO: Check if this is the correct server to serve this request
+	if !ss.ValidateServer(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
 	ss.putRequestChan <- *args
 	*reply = <-ss.putReplyChan
 	return nil
 }
 
 func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	// TODO: Check if this is the correct server to serve this request
+	if !ss.ValidateServer(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
 	ss.appendListRequestChan <- *args
 	*reply = <-ss.appendListReplyChan
 	return nil
 }
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	// TODO: Check if this is the correct server to serve this request
+	if !ss.ValidateServer(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
 	ss.removeListRequestChan <- *args
 	*reply = <-ss.removeListReplyChan
 	return nil
+}
+
+//
+// Check whether this server is the right server to handle the request
+//
+func (ss *storageServer) ValidateServer(key string) bool {
+	hashedKey := libstore.StoreHash(key)
+
+	candVirtualID := ss.virtualIDs[0]
+	for idx, curID := range ss.virtualIDs {
+		if idx == 0 {
+			continue
+		}
+		if curID > hashedKey {
+			candVirtualID = curID
+			break
+		}
+	}
+
+	for _, serverInfo := range ss.allServers {
+		if serverInfo.HostPort == ss.myHostPort {
+			continue
+		}
+		for _, curID := range serverInfo.VirtualIDs {
+			if curID > hashedKey && curID < candVirtualID {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 //
