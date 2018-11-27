@@ -292,6 +292,15 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 }
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
+	ls.mux.Lock()
+	defer ls.mux.Unlock()
+
+	if _, ok := ls.leaseValidTime[args.Key]; !ok {
+		reply.Status = storagerpc.KeyNotFound
+	} else {
+		ls.ClearCache(args.Key)
+		reply.Status = storagerpc.OK
+	}
 	return errors.New("not implemented")
 }
 
