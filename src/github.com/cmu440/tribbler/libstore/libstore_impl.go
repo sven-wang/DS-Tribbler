@@ -13,13 +13,19 @@ import (
 // The Libstore instance uses an 'rpc.Client' in order to perform RPCs to the
 // Master StorageServer.
 type libstore struct {
-	// TODO: Add hash table as the cache here for final checkpoint
 	mux            sync.Mutex             // Lock for the libstore instance
 	msClient       *rpc.Client            // RPC client to the Master StorageServer
 	storageServers []simpleNode           // List of storage servers that are in the hash ring
 	mode           LeaseMode              // Debugging flag
 	myHostPort     string                 // IP address of the libstore instance
 	hostToClient   map[string]*rpc.Client // Cache for the seen connections' clients
+
+	// Cache for the Libstore instance
+	stringCache map[string]string		  // Data cache for string value
+	listCache map[string][]string		  // Data cache for string slice value
+	leaseStartTime map[string]int64	      // Cache for each cached data's entry time
+	leaseValidTime map[string]int		  // Cache for each cached data's lease time
+	requestTimeWindow	   map[string][]int64	  // Cache for each query's count
 }
 
 // Simplified Node struct - Only store one virtual ID for a server
@@ -57,6 +63,13 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	ls.mode = mode
 	ls.myHostPort = myHostPort
 	ls.hostToClient = make(map[string]*rpc.Client)
+	if mode != Never {
+		ls.stringCache = make(map[string]string)
+		ls.listCache = make(map[string][]string)
+		ls.leaseStartTime = make(map[string]int64)
+		ls.leaseValidTime = make(map[string]int)
+		ls.requestTimeWindow = make(map[string][]int64)
+	}
 
 	// Contact the master server to know a list of available storage servers via GetServers RPC
 	client, err := rpc.DialHTTP("tcp", masterServerHostPort)
@@ -108,14 +121,27 @@ func FlattenServers(servers []storagerpc.Node) []simpleNode {
 }
 
 func (ls *libstore) Get(key string) (string, error) {
-	// TODO: Add lease caching for final checkpoint
 	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
 	reply := &storagerpc.GetReply{}
 	// Request route
-	client, err := ls.RouteServer(key)
+	client, requestLease, err := ls.RouteServer(key)
 	if err != nil {
 		return "", err
 	}
+
+	// If lease is requested
+	if requestLease {
+		args.WantLease = true
+	} else {
+		// If the libstore instance is caching the value
+		ls.mux.Lock()
+		if val, ok := ls.stringCache[key]; ok {
+			ls.mux.Unlock()
+			return val, nil
+		}
+		ls.mux.Unlock()
+	}
+
 	err = client.Call("StorageServer.Get", args, reply)
 	if err != nil {
 		return "", err
@@ -125,6 +151,18 @@ func (ls *libstore) Get(key string) (string, error) {
 	} else if reply.Status != storagerpc.OK {
 		return "", errors.New("get fails")
 	}
+
+	// If the lease request is submitted and granted
+	if requestLease && reply.Lease.Granted {
+		ls.mux.Lock()
+		defer ls.mux.Unlock()
+
+		curTimeStamp := time.Now().UnixNano()
+		ls.stringCache[key] = reply.Value
+		ls.leaseStartTime[key] = curTimeStamp
+		ls.leaseValidTime[key] = reply.Lease.ValidSeconds
+	}
+
 	return reply.Value, nil
 }
 
@@ -132,7 +170,7 @@ func (ls *libstore) Put(key, value string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: value}
 	reply := &storagerpc.PutReply{}
 	// Request route
-	client, err := ls.RouteServer(key)
+	client, _, err := ls.RouteServer(key)
 	if err != nil {
 		return err
 	}
@@ -150,7 +188,7 @@ func (ls *libstore) Delete(key string) error {
 	args := &storagerpc.DeleteArgs{Key: key}
 	reply := &storagerpc.DeleteReply{}
 	// Request route
-	client, err := ls.RouteServer(key)
+	client, _, err := ls.RouteServer(key)
 	if err != nil {
 		return err
 	}
@@ -168,22 +206,45 @@ func (ls *libstore) Delete(key string) error {
 }
 
 func (ls *libstore) GetList(key string) ([]string, error) {
-	// TODO: Add lease caching for final checkpoint
 	args := &storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
 	reply := &storagerpc.GetListReply{}
 	// Request route
-	client, err := ls.RouteServer(key)
+	client, requestLease, err := ls.RouteServer(key)
 	if err != nil {
 		return nil, err
 	}
+
+	// If lease is requested
+	if requestLease {
+		args.WantLease = true
+	} else {
+		// If the libstore instance is caching the value
+		ls.mux.Lock()
+		if val, ok := ls.listCache[key]; ok {
+			ls.mux.Unlock()
+			return val, nil
+		}
+		ls.mux.Unlock()
+	}
+
 	err = client.Call("StorageServer.GetList", args, reply)
 	if err != nil {
 		return nil, err
 	}
-	// TODO: Whether this is the right choice?
+
 	if reply.Status != storagerpc.KeyNotFound && reply.Status != storagerpc.OK {
 		return nil, errors.New("get list fails")
 	} else {
+		// If the lease request is submitted and granted
+		if requestLease && reply.Lease.Granted {
+			ls.mux.Lock()
+			defer ls.mux.Unlock()
+
+			curTimeStamp := time.Now().UnixNano()
+			ls.listCache[key] = reply.Value
+			ls.leaseStartTime[key] = curTimeStamp
+			ls.leaseValidTime[key] = reply.Lease.ValidSeconds
+		}
 		return reply.Value, nil
 	}
 }
@@ -192,7 +253,7 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: removeItem}
 	reply := &storagerpc.PutReply{}
 	// Request route
-	client, err := ls.RouteServer(key)
+	client, _, err := ls.RouteServer(key)
 	if err != nil {
 		return err
 	}
@@ -213,7 +274,7 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: newItem}
 	reply := &storagerpc.PutReply{}
 	// Request route
-	client, err := ls.RouteServer(key)
+	client, _, err := ls.RouteServer(key)
 	if err != nil {
 		return err
 	}
@@ -237,7 +298,7 @@ func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storage
 //
 // Given a key (not the hashed key), find the correct server to handle the request
 //
-func (ls *libstore) RouteServer(key string) (*rpc.Client, error) {
+func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 	hashedKey := StoreHash(key)
 	var chosenServer = ""
 
@@ -258,16 +319,77 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, error) {
 	ls.mux.Lock()
 	defer ls.mux.Unlock()
 
+	// Check whether lease is required
+	requestLease := false
+	if ls.mode != Never {
+		curTimeStamp := time.Now().UnixNano()
+		checkLeaseRequirement := true
+		// If this key has been cached, check whether it is still valid
+		if startTime, ok := ls.leaseStartTime[key]; ok {
+			// If the cache is outdated
+			// TODO: > or >= here
+			if int(curTimeStamp - startTime) > ls.leaseValidTime[key] + storagerpc.LeaseGuardSeconds {
+				// Delete the outdated cache
+				ls.ClearCache(key)
+			} else {
+				// If the cache is still valid
+				checkLeaseRequirement = false
+			}
+		}
+		// If it is necessary to check the requirement of lease
+		if checkLeaseRequirement {
+			if ls.mode == Always {
+				requestLease = true
+			} else if ls.mode == Normal {
+				if times, ok := ls.requestTimeWindow[key]; ok {
+					// Clear the outdated query in the query sliding window
+					idx := 0
+					for idx < len(times) {
+						// TODO: > or >= here
+						if times[idx] + storagerpc.QueryCacheSeconds > curTimeStamp {
+							break
+						}
+						idx++
+					}
+					ls.requestTimeWindow[key] = times[idx:]
+				} else {
+					ls.requestTimeWindow[key] = nil
+				}
+				// If there are enough queries in the past QueryCacheSeconds, request the lease
+				if len(ls.requestTimeWindow[key]) >= storagerpc.QueryCacheThresh {
+					requestLease = true
+				}
+				ls.requestTimeWindow[key] = append(ls.requestTimeWindow[key], curTimeStamp)
+			}
+		} else if ls.mode == Normal {
+			if _, ok := ls.requestTimeWindow[key]; !ok {
+				ls.requestTimeWindow[key] = nil
+			}
+			// Do not clear the outdated entry until the cache is invalid
+			ls.requestTimeWindow[key] = append(ls.requestTimeWindow[key], curTimeStamp)
+		}
+	}
+
 	// If this server is connected for the first time, build the connection and cache the client
 	if client, ok := ls.hostToClient[chosenServer]; !ok {
 		client, err := rpc.DialHTTP("tcp", chosenServer)
 		if err != nil {
-			return nil, err
+			return nil, requestLease, err
 		} else {
 			ls.hostToClient[chosenServer] = client
-			return client, nil
+			return client, requestLease, nil
 		}
 	} else {
-		return client, nil
+		return client, requestLease, nil
 	}
+}
+
+//
+// Clear the cache of a given key
+//
+func (ls *libstore) ClearCache(key string) {
+	delete(ls.stringCache, key)
+	delete(ls.listCache, key)
+	delete(ls.leaseStartTime, key)
+	delete(ls.leaseValidTime, key)
 }
