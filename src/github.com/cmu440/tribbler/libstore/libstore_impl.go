@@ -2,6 +2,7 @@ package libstore
 
 import (
 	"errors"
+	"github.com/cmu440/tribbler/rpc/librpc"
 	"net/rpc"
 	"sort"
 	"sync"
@@ -60,6 +61,8 @@ type simpleNode struct {
 // simply reuse the TribServer's HTTP handler since the two run in the same process).
 func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libstore, error) {
 	ls := new(libstore)
+	// Libstore instance registers itself for RevokeLease RPC
+	rpc.RegisterName("LeaseCallbacks", librpc.Wrap(ls))
 	ls.mode = mode
 	ls.myHostPort = myHostPort
 	ls.hostToClient = make(map[string]*rpc.Client)
@@ -157,9 +160,8 @@ func (ls *libstore) Get(key string) (string, error) {
 		ls.mux.Lock()
 		defer ls.mux.Unlock()
 
-		curTimeStamp := time.Now().UnixNano()
 		ls.stringCache[key] = reply.Value
-		ls.leaseStartTime[key] = curTimeStamp
+		ls.leaseStartTime[key] = time.Now().UnixNano()
 		ls.leaseValidTime[key] = reply.Lease.ValidSeconds
 	}
 
@@ -240,9 +242,8 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 			ls.mux.Lock()
 			defer ls.mux.Unlock()
 
-			curTimeStamp := time.Now().UnixNano()
 			ls.listCache[key] = reply.Value
-			ls.leaseStartTime[key] = curTimeStamp
+			ls.leaseStartTime[key] = time.Now().UnixNano()
 			ls.leaseValidTime[key] = reply.Lease.ValidSeconds
 		}
 		return reply.Value, nil
@@ -301,7 +302,34 @@ func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storage
 		ls.ClearCache(args.Key)
 		reply.Status = storagerpc.OK
 	}
-	return errors.New("not implemented")
+	return nil
+}
+
+//
+// Handle timeout revoke for each granted lease
+//
+func (ls *libstore) TimeoutRevoke(key string, startTime int64, validTime int) {
+	timer := time.NewTimer(time.Duration(validTime + storagerpc.LeaseGuardSeconds) * time.Second)
+	revokeLeaseFlag := false
+	// Hang for a while
+	for {
+		select {
+		case <-timer.C:
+			ls.mux.Lock()
+			if curStartTime, ok := ls.leaseStartTime[key]; ok {
+				if curStartTime == startTime {
+					revokeLeaseFlag = true
+				}
+			}
+			ls.mux.Unlock()
+			break
+		}
+	}
+	if revokeLeaseFlag {
+		ls.mux.Lock()
+		defer ls.mux.Unlock()
+		ls.ClearCache(key)
+	}
 }
 
 //
@@ -314,7 +342,8 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 	// Find the proper server to serve this request. Since the virtual IDs are sorted in the storageServers list, break
 	// the loop once a virtual ID that is bigger than the hashed key is found
 	for _, serverInfo := range ls.storageServers {
-		if hashedKey < serverInfo.virtualID {
+		// Need to be <= rather than ==
+		if hashedKey <= serverInfo.virtualID {
 			chosenServer = serverInfo.hostPort
 			break
 		}
@@ -337,7 +366,7 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 		if startTime, ok := ls.leaseStartTime[key]; ok {
 			// If the cache is outdated
 			// TODO: > or >= here
-			if int(curTimeStamp - startTime) > ls.leaseValidTime[key] + storagerpc.LeaseGuardSeconds {
+			if int(curTimeStamp - startTime) > ls.leaseValidTime[key] {
 				// Delete the outdated cache
 				ls.ClearCache(key)
 			} else {

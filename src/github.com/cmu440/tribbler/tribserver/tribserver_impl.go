@@ -26,7 +26,6 @@ type tribServer struct {
 // For hints on how to properly setup RPC, see the rpc/tribrpc package.
 func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) {
 	ts := new(tribServer)
-	// TODO: Change lease level for final checkpoint
 	libStoreInstance, err := libstore.NewLibstore(masterServerHostPort, myHostPort, libstore.Never)
 	if err != nil {
 		return nil, err
@@ -44,9 +43,6 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	if err != nil {
 		return nil, err
 	}
-
-	// TODO: User the same HTTP handler for TribServer and Libstrore (final checkpoint)
-	// rpc.RegisterName("LeaseCallbacks", librpc.Wrap(libStoreInstance))
 
 	// Setup the HTTP handler that will server incoming RPCs and
 	// serve requests in a background goroutine.

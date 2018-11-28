@@ -47,7 +47,10 @@ type storageServer struct {
 	removeListRequestChan chan storagerpc.PutArgs
 	removeListReplyChan   chan storagerpc.PutReply
 
-	// TODO: add stuff related to lease for the final checkpoint
+	keyToLibstore		map[string][]string		// Map from key to the Libstore instances that cache this key
+	keyToLock		    map[string]*sync.Mutex	// Fine grained user-level lock
+	revokingKey			map[string]int			// Map of keys that are being revoked
+	leaseStartTime      map[string]int64	    // Each granted lease's latest start time
 }
 
 type registerInfo struct {
@@ -87,6 +90,12 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.appendListReplyChan = make(chan storagerpc.PutReply)
 	ss.removeListRequestChan = make(chan storagerpc.PutArgs)
 	ss.removeListReplyChan = make(chan storagerpc.PutReply)
+
+	// Data fields for caching and leasing
+	ss.keyToLibstore = make(map[string][]string)
+	ss.keyToLock = make(map[string]*sync.Mutex)
+	ss.revokingKey = make(map[string]int)		// Used for stop granting lease for the key
+	ss.leaseStartTime = make(map[string]int64)
 
 	ownHostAddr := net.JoinHostPort("localhost", strconv.Itoa(port))
 	ss.myHostPort = ownHostAddr
@@ -219,6 +228,10 @@ func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.D
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
+
+	// Check whether the key is being revoked. If not, revoke the key
+	ss.RevokeLease(args.Key)
+
 	ss.deleteRequestChan <- *args
 	*reply = <-ss.deleteReplyChan
 	return nil
@@ -239,6 +252,10 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
+
+	// Check whether the key is being revoked. If not, revoke the key
+	ss.RevokeLease(args.Key)
+
 	ss.putRequestChan <- *args
 	*reply = <-ss.putReplyChan
 	return nil
@@ -249,6 +266,10 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
+
+	// Check whether the key is being revoked. If not, revoke the key
+	ss.RevokeLease(args.Key)
+
 	ss.appendListRequestChan <- *args
 	*reply = <-ss.appendListReplyChan
 	return nil
@@ -259,6 +280,10 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
+
+	// Check whether the key is being revoked. If not, revoke the key
+	ss.RevokeLease(args.Key)
+
 	ss.removeListRequestChan <- *args
 	*reply = <-ss.removeListReplyChan
 	return nil
@@ -306,7 +331,36 @@ func (ss *storageServer) MainRoutine() {
 			if val, ok := ss.stringTable[args.Key]; ok {
 				reply.Status = storagerpc.OK
 				reply.Value = val
-				// TODO: Add lease stuff for the final checkpoint
+				// If the Libstore instance wants a lease on the key
+				if args.WantLease {
+					ss.mux.Lock()
+					// If the key is being revoked, stop granting
+					if _, ok := ss.revokingKey[args.Key]; ok {
+						reply.Lease.Granted = false
+					} else {
+						grant := true
+						if hostPorts, ok := ss.keyToLibstore[args.Key]; ok {
+							for _, hostPort := range hostPorts {
+								if hostPort == args.HostPort {
+									grant = false
+									reply.Lease.Granted = false
+									break
+								}
+							}
+						} else {
+							ss.keyToLibstore[args.Key] = nil
+						}
+						if grant {
+							ss.keyToLibstore[args.Key] = append(ss.keyToLibstore[args.Key], args.HostPort)
+							reply.Lease.Granted = true
+							reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
+							timestamp := time.Now().UnixNano()
+							ss.leaseStartTime[args.Key] = timestamp
+							go ss.TimeoutRevoke(args.Key, timestamp, reply.Lease.ValidSeconds)
+						}
+					}
+					ss.mux.Unlock()
+				}
 			} else {
 				reply.Status = storagerpc.KeyNotFound
 			}
@@ -316,7 +370,6 @@ func (ss *storageServer) MainRoutine() {
 			if _, ok := ss.stringTable[args.Key]; ok {
 				reply.Status = storagerpc.OK
 				delete(ss.stringTable, args.Key)
-				// TODO: Add revoke for the final checkpoint
 			} else {
 				reply.Status = storagerpc.KeyNotFound
 			}
@@ -325,9 +378,37 @@ func (ss *storageServer) MainRoutine() {
 			reply := storagerpc.GetListReply{}
 			if list, ok := ss.listTable[args.Key]; ok {
 				reply.Status = storagerpc.OK
-				// TODO: reference copy OK here?
 				reply.Value = list
-				// TODO: Add lease stuff for the final checkpoint
+				// If the Libstore instance wants a lease on the key
+				if args.WantLease {
+					ss.mux.Lock()
+					// If the key is being revoked, stop granting
+					if _, ok := ss.revokingKey[args.Key]; ok {
+						reply.Lease.Granted = false
+					} else {
+						grant := true
+						if hostPorts, ok := ss.keyToLibstore[args.Key]; ok {
+							for _, hostPort := range hostPorts {
+								if hostPort == args.HostPort {
+									grant = false
+									reply.Lease.Granted = false
+									break
+								}
+							}
+						} else {
+							ss.keyToLibstore[args.Key] = nil
+						}
+						if grant {
+							ss.keyToLibstore[args.Key] = append(ss.keyToLibstore[args.Key], args.HostPort)
+							reply.Lease.Granted = true
+							reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
+							timestamp := time.Now().UnixNano()
+							ss.leaseStartTime[args.Key] = timestamp
+							go ss.TimeoutRevoke(args.Key, timestamp, reply.Lease.ValidSeconds)
+						}
+					}
+					ss.mux.Unlock()
+				}
 			} else {
 				reply.Status = storagerpc.KeyNotFound
 			}
@@ -352,7 +433,6 @@ func (ss *storageServer) MainRoutine() {
 					break
 				}
 			}
-			// TODO: Add revoke for the final checkpoint
 			if !existFlag {
 				ss.listTable[args.Key] = append(ss.listTable[args.Key], args.Value)
 				reply.Status = storagerpc.OK
@@ -379,9 +459,116 @@ func (ss *storageServer) MainRoutine() {
 				ss.listTable[args.Key] = append(ss.listTable[args.Key][:targetIdx],
 					ss.listTable[args.Key][targetIdx+1:]...)
 				reply.Status = storagerpc.OK
-				// TODO: Add revoke for the final checkpoint
 			}
 			ss.removeListReplyChan <- reply
 		}
 	}
+}
+
+//
+// Handle timeout revoke for each granted lease
+//
+func (ss *storageServer) TimeoutRevoke(key string, startTime int64, validTime int) {
+	timer := time.NewTimer(time.Duration(validTime + storagerpc.LeaseGuardSeconds) * time.Second)
+	revokeLeaseFlag := false
+	// Hang for a while
+	for {
+		select {
+		case <-timer.C:
+			ss.mux.Lock()
+			if curStartTime, ok := ss.leaseStartTime[key]; ok {
+				if curStartTime == startTime {
+					revokeLeaseFlag = true
+				}
+			}
+			ss.mux.Unlock()
+			break
+		}
+	}
+	if revokeLeaseFlag {
+		ss.RevokeLease(key)
+	}
+}
+
+//
+// Revoke all the leases associated with the same key. In the same time, block all the rpc calls that try to change the
+// value of the key
+//
+func (ss *storageServer) RevokeLease(key string) bool {
+	var lockOnKey *sync.Mutex
+	ss.mux.Lock()
+	if lockOnKey, ok := ss.keyToLock[key]; !ok {
+		lockOnKey = &sync.Mutex{}
+		ss.keyToLock[key] = lockOnKey
+	}
+	if _, ok := ss.revokingKey[key]; !ok {
+		ss.revokingKey[key] = 1
+	} else {
+		ss.revokingKey[key]++
+	}
+	ss.mux.Unlock()
+
+	revokeReplyChan := make(chan bool)
+	// Lock the key when revoke lease, so other modification RPC calls cannot proceed until all revoke lease finished
+	lockOnKey.Lock()
+	defer lockOnKey.Unlock()
+
+	totalCnt := 0
+	ss.mux.Lock()
+	if hostPorts, ok := ss.keyToLibstore[key]; ok {
+		for _, hostPort := range hostPorts {
+			totalCnt++
+			go SendRevokeLease(key, hostPort, revokeReplyChan)
+		}
+	}
+	ss.mux.Unlock()
+
+	currentCnt := 0
+	if totalCnt > 0 {
+		for {
+			select {
+			case <-revokeReplyChan:
+				currentCnt++
+				if currentCnt == totalCnt {
+					break
+				}
+			}
+		}
+	}
+
+	ss.mux.Lock()
+	if ss.revokingKey[key] == 1 {
+		delete(ss.revokingKey, key)
+	} else {
+		ss.revokingKey[key]--
+	}
+	// Always clear the keyToLibstore[key]
+	ss.keyToLibstore[key] = nil
+	ss.mux.Unlock()
+	return true
+}
+
+func SendRevokeLease(key string, hostPort string, revokeReplyChan chan bool) {
+	// TODO: May add cache for the client here
+	client, err := rpc.DialHTTP("tcp", hostPort)
+	if err != nil {
+		fmt.Println("Cannot contact the libstore!")
+		revokeReplyChan <- true
+		return
+	}
+
+	args := &storagerpc.RevokeLeaseArgs{Key: key}
+	reply := &storagerpc.RevokeLeaseReply{}
+	err = client.Call("LeaseCallbacks.RevokeLease", args, reply)
+
+	if err != nil {
+		fmt.Println("Error during RevokeLease RPC call!")
+		revokeReplyChan <- true
+		return
+	}
+
+	if reply.Status != storagerpc.OK && reply.Status != storagerpc.KeyNotFound {
+		fmt.Println("Unknown RevokeLease reply!")
+	}
+	revokeReplyChan <- true
 }
