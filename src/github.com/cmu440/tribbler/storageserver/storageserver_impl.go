@@ -472,19 +472,17 @@ func (ss *storageServer) TimeoutRevoke(key string, startTime int64, validTime in
 	timer := time.NewTimer(time.Duration(validTime + storagerpc.LeaseGuardSeconds) * time.Second)
 	revokeLeaseFlag := false
 	// Hang for a while
-	for {
-		select {
-		case <-timer.C:
-			ss.mux.Lock()
-			if curStartTime, ok := ss.leaseStartTime[key]; ok {
-				if curStartTime == startTime {
-					revokeLeaseFlag = true
-				}
-			}
-			ss.mux.Unlock()
-			break
+	<-timer.C
+	ss.mux.Lock()
+	//fmt.Println("key", key)
+	//fmt.Println("start time", startTime)
+	//fmt.Println(ss.leaseStartTime)
+	if curStartTime, ok := ss.leaseStartTime[key]; ok {
+		if curStartTime == startTime {
+			revokeLeaseFlag = true
 		}
 	}
+	ss.mux.Unlock()
 	if revokeLeaseFlag {
 		ss.RevokeLease(key)
 	}
@@ -524,12 +522,13 @@ func (ss *storageServer) RevokeLease(key string) bool {
 
 	currentCnt := 0
 	if totalCnt > 0 {
-		for {
+		breakLoop := false
+		for !breakLoop {
 			select {
 			case <-revokeReplyChan:
 				currentCnt++
 				if currentCnt == totalCnt {
-					break
+					breakLoop = true
 				}
 			}
 		}
@@ -542,7 +541,7 @@ func (ss *storageServer) RevokeLease(key string) bool {
 		ss.revokingKey[key]--
 	}
 	// Always clear the keyToLibstore[key]
-	ss.keyToLibstore[key] = nil
+	delete(ss.keyToLibstore, key)
 	ss.mux.Unlock()
 	return true
 }
