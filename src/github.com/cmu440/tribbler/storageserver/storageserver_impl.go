@@ -495,12 +495,11 @@ func (ss *storageServer) TimeoutRevoke(key string, startTime int64, validTime in
 // value of the key
 //
 func (ss *storageServer) RevokeLease(key string) bool {
-	var lockOnKey *sync.Mutex
 	ss.mux.Lock()
-	if lockOnKey, ok := ss.keyToLock[key]; !ok {
-		lockOnKey = &sync.Mutex{}
-		ss.keyToLock[key] = lockOnKey
+	if _, ok := ss.keyToLock[key]; !ok {
+		ss.keyToLock[key] = &sync.Mutex{}
 	}
+	lockOnKey := ss.keyToLock[key]
 	if _, ok := ss.revokingKey[key]; !ok {
 		ss.revokingKey[key] = 1
 	} else {
