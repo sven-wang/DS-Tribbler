@@ -80,24 +80,26 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	}
 	ls.msClient = client
 	args := &storagerpc.GetServersArgs{}
-	reply := &storagerpc.GetServersReply{}
 	// Retry no more than 5 times
-	retryCnt := 0
-	for retryCnt < 6 {
+	tryCnt := 0
+	serverOk := false
+	for tryCnt < 6 {
+		reply := &storagerpc.GetServersReply{}
 		err = client.Call("StorageServer.GetServers", args, reply)
 		if err != nil {
 			return nil, err
 		}
 		if reply.Status == storagerpc.NotReady {
-			time.Sleep(1 * time.Second)
+			time.Sleep(time.Second)
 		} else if reply.Status == storagerpc.OK {
 			ls.storageServers = FlattenServers(reply.Servers)
+			serverOk = true
 			break
 		}
-		retryCnt++
+		tryCnt++
 	}
 
-	if retryCnt == 5 {
+	if !serverOk {
 		return nil, errors.New("storage servers took too long to get ready")
 	}
 
@@ -384,7 +386,7 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 	if client, ok := ls.hostToClient[chosenServer]; !ok {
 		client, err := rpc.DialHTTP("tcp", chosenServer)
 		for err != nil {
-			time.Sleep(time.Microsecond)
+			time.Sleep(10 * time.Microsecond)
 			client, err = rpc.DialHTTP("tcp", chosenServer)
 		}
 		ls.hostToClient[chosenServer] = client
