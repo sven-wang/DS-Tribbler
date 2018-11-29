@@ -383,12 +383,12 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 	// If this server is connected for the first time, build the connection and cache the client
 	if client, ok := ls.hostToClient[chosenServer]; !ok {
 		client, err := rpc.DialHTTP("tcp", chosenServer)
-		if err != nil {
-			return nil, requestLease, err
-		} else {
-			ls.hostToClient[chosenServer] = client
-			return client, requestLease, nil
+		for err != nil {
+			time.Sleep(time.Microsecond)
+			client, err = rpc.DialHTTP("tcp", chosenServer)
 		}
+		ls.hostToClient[chosenServer] = client
+		return client, requestLease, nil
 	} else {
 		return client, requestLease, nil
 	}
