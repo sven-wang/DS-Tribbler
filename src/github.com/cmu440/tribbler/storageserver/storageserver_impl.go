@@ -21,13 +21,13 @@ const (
 )
 
 type storageServer struct {
-	role         Role                       // Role of this storage server - MASTER or SLAVE
-	registerChan chan registerInfo          // Channel used for register servers
-	mux          sync.Mutex                 // Lock for this storage server
-	numNodes     int                        // Number of servers in the hash ring
-	allServers   map[string]storagerpc.Node // All the storage servers in the system
-	virtualIDs   []uint32                   // Virtual IDs assigned to this server
-	myHostPort   string                     // Host address for this server
+	role           Role                       // Role of this storage server - MASTER or SLAVE
+	registerChan   chan storagerpc.Node       // Channel used for register servers
+	mux            sync.Mutex                 // Lock for this storage server
+	numNodes       int                        // Number of servers in the hash ring
+	allServers     map[string]storagerpc.Node // All the storage servers in the system
+	flattenServers []simpleNode               // For the ease of server validation
+	myHostPort     string                     // Host address for this server
 
 	// Hash tables for this server
 	stringTable map[string]string
@@ -47,15 +47,45 @@ type storageServer struct {
 	removeListRequestChan chan storagerpc.PutArgs
 	removeListReplyChan   chan storagerpc.PutReply
 
-	keyToLibstore		map[string][]string		// Map from key to the Libstore instances that cache this key
-	keyToLock		    map[string]*sync.Mutex	// Fine grained user-level lock
-	revokingKey			map[string]int			// Map of keys that are being revoked
-	leaseStartTime      map[string]int64	    // Each granted lease's latest start time
+	// Data structures for caching and leasing
+	keyToLeases      map[string]*leasesInfo
+	beingRevokedKeys map[string]bool
 }
 
-type registerInfo struct {
-	serverInfo storagerpc.Node
-	lenChan    chan int
+// Simplified Node struct - Only store one virtual ID for a server
+type simpleNode struct {
+	hostPort  string // The host:port address of the storage server node.
+	virtualID uint32 // One of the virtual IDs identifying this storage server node.
+}
+
+type leaseInfo struct {
+	startTime int64
+	validTime int
+}
+
+// All the leases for a given key
+type leasesInfo struct {
+	updateLock  sync.Mutex
+	accessLock  sync.Mutex
+	validLeases map[string]leaseInfo
+}
+
+//
+// Flatten the slice of storagerpc.Node to slice of simpleNode, which is order by each virtual ID
+//
+func FlattenServers(servers map[string]storagerpc.Node) []simpleNode {
+	var flattenedServers []simpleNode
+	for _, serverInfo := range servers {
+		curHostPort := serverInfo.HostPort
+		for _, virtualID := range serverInfo.VirtualIDs {
+			flattenedServers = append(flattenedServers, simpleNode{hostPort: curHostPort, virtualID: virtualID})
+		}
+	}
+	// Sort the simpleNode list using virtualID in ascending order
+	sort.Slice(flattenedServers, func(i, j int) bool {
+		return flattenedServers[i].virtualID < flattenedServers[j].virtualID
+	})
+	return flattenedServers
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -68,11 +98,11 @@ type registerInfo struct {
 // and should return a non-nil error if the storage server could not be started.
 func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualIDs []uint32) (StorageServer, error) {
 	ss := new(storageServer)
-	ss.virtualIDs = virtualIDs
-	// Sort the virtual IDs owned by this storage server in ascending order so as to ease server validation
-	sort.Slice(ss.virtualIDs, func(i, j int) bool {
-		return ss.virtualIDs[i] < ss.virtualIDs[j]
-	})
+	// Wrap the storageServer before registering it for RPC.
+	err := rpc.RegisterName("StorageServer", storagerpc.Wrap(ss))
+	if err != nil {
+		return nil, err
+	}
 	ss.numNodes = numNodes
 	ss.allServers = make(map[string]storagerpc.Node)
 	ss.stringTable = make(map[string]string)
@@ -92,52 +122,39 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.removeListReplyChan = make(chan storagerpc.PutReply)
 
 	// Data fields for caching and leasing
-	ss.keyToLibstore = make(map[string][]string)
-	ss.keyToLock = make(map[string]*sync.Mutex)
-	ss.revokingKey = make(map[string]int)		// Used for stop granting lease for the key
-	ss.leaseStartTime = make(map[string]int64)
+	ss.keyToLeases = make(map[string]*leasesInfo)
+	ss.beingRevokedKeys = make(map[string]bool)
 
 	ownHostAddr := net.JoinHostPort("localhost", strconv.Itoa(port))
 	ss.myHostPort = ownHostAddr
-	// Create the server socket that will listen for incoming RPCs.
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return nil, err
-	}
-
-	// Wrap the storageServer before registering it for RPC.
-	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(ss))
-	if err != nil {
-		return nil, err
-	}
-
-	// Setup the HTTP handler that will server incoming RPCs and
-	// serve requests in a background goroutine.
-	rpc.HandleHTTP()
-	go http.Serve(listener, nil)
 
 	// If the server is the MASTER server
 	if len(masterServerHostPort) == 0 {
+		err = StartListen(port)
+		if err != nil {
+			return nil, err
+		}
+
 		ss.role = MASTER
-		ss.registerChan = make(chan registerInfo)
+		ss.registerChan = make(chan storagerpc.Node)
 
 		// MASTER registers itself first
 		ss.mux.Lock()
 		ss.allServers[ownHostAddr] = storagerpc.Node{HostPort: ownHostAddr, VirtualIDs: virtualIDs}
 		ss.mux.Unlock()
 		if numNodes > 1 {
-			for {
+			breakLoopFlag := false
+			for !breakLoopFlag {
 				select {
-				case registerInfo := <-ss.registerChan:
-					newNode := registerInfo.serverInfo
+				case newNode := <-ss.registerChan:
 					ss.mux.Lock()
 					if _, ok := ss.allServers[newNode.HostPort]; !ok {
 						ss.allServers[newNode.HostPort] = newNode
 					}
-					registerInfo.lenChan <- len(ss.allServers)
-					// All servers have registered
+					// All servers have received OK
 					if len(ss.allServers) == ss.numNodes {
 						ss.mux.Unlock()
+						breakLoopFlag = true
 						break
 					}
 					ss.mux.Unlock()
@@ -147,21 +164,22 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	} else {
 		ss.role = SLAVE
 		// SLAVE server ask the MASTER to add itself into the ring
-		client, err := rpc.DialHTTP("tcp", net.JoinHostPort(masterServerHostPort, strconv.Itoa(port)))
-		if err != nil {
-			return nil, err
+		client, err := rpc.DialHTTP("tcp", masterServerHostPort)
+		// Handle initialization dial error
+		for err != nil {
+			time.Sleep(time.Millisecond)
+			client, err = rpc.DialHTTP("tcp", masterServerHostPort)
 		}
 
 		args := &storagerpc.RegisterArgs{ServerInfo: storagerpc.Node{HostPort: ownHostAddr, VirtualIDs: virtualIDs}}
-		reply := &storagerpc.RegisterReply{}
-		// Retry no more than 5 times
 		for {
+			reply := &storagerpc.RegisterReply{}
 			err = client.Call("StorageServer.RegisterServer", args, reply)
 			if err != nil {
 				return nil, err
 			}
 			if reply.Status == storagerpc.NotReady {
-				time.Sleep(1 * time.Second)
+				time.Sleep(time.Second)
 			} else if reply.Status == storagerpc.OK {
 				ss.mux.Lock()
 				for _, nodeInfo := range reply.Servers {
@@ -171,27 +189,53 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 				break
 			}
 		}
+
+		err = StartListen(port)
+		if err != nil {
+			return nil, err
+		}
 	}
 
+	ss.flattenServers = FlattenServers(ss.allServers)
 	// Start the main routine after setup
 	go ss.MainRoutine()
 	return ss, nil
 }
 
-func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
-	lenChan := make(chan int)
-	ss.registerChan <- registerInfo{lenChan: lenChan, serverInfo: args.ServerInfo}
-	serverNum := <-lenChan
+func StartListen(port int) error {
+	// Create the server socket that will listen for incoming RPCs.
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return err
+	}
 
-	if serverNum == ss.numNodes {
+	// Setup the HTTP handler that will server incoming RPCs and
+	// serve requests in a background goroutine.
+	rpc.HandleHTTP()
+	go http.Serve(listener, nil)
+	return nil
+}
+
+func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
+	ss.mux.Lock()
+	var registeredServers []storagerpc.Node
+	for _, nodeInfo := range ss.allServers {
+		registeredServers = append(registeredServers, nodeInfo)
+	}
+	if len(ss.allServers) == ss.numNodes {
+		ss.mux.Unlock()
 		reply.Status = storagerpc.OK
-		var registeredServers []storagerpc.Node
-		for _, nodeInfo := range ss.allServers {
-			registeredServers = append(registeredServers, nodeInfo)
-		}
 		reply.Servers = registeredServers
 	} else {
-		reply.Status = storagerpc.NotReady
+		if _, ok := ss.allServers[args.ServerInfo.HostPort]; !ok && len(ss.allServers) == ss.numNodes-1 {
+			registeredServers = append(registeredServers, args.ServerInfo)
+			reply.Status = storagerpc.OK
+			reply.Servers = registeredServers
+		} else {
+			reply.Status = storagerpc.NotReady
+		}
+		ss.mux.Unlock()
+		ss.registerChan <- args.ServerInfo
 	}
 	return nil
 }
@@ -229,11 +273,27 @@ func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.D
 		return nil
 	}
 
-	// Check whether the key is being revoked. If not, revoke the key
-	ss.RevokeLease(args.Key)
+	// Check whether the key is being granted lease(s). If so, revoke all of the leases
+	ss.mux.Lock()
+	if leases, ok := ss.keyToLeases[args.Key]; ok {
+		ss.mux.Unlock()
+		leases.updateLock.Lock()
+		leases.accessLock.Lock()
+		if len(leases.validLeases) > 0 {
+			leases.accessLock.Unlock()
+			defer leases.updateLock.Unlock()
+			ss.RevokeLease(args.Key, leases)
+		} else {
+			leases.accessLock.Unlock()
+			leases.updateLock.Unlock()
+		}
+	} else {
+		ss.mux.Unlock()
+	}
 
 	ss.deleteRequestChan <- *args
 	*reply = <-ss.deleteReplyChan
+
 	return nil
 }
 
@@ -253,8 +313,23 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 		return nil
 	}
 
-	// Check whether the key is being revoked. If not, revoke the key
-	ss.RevokeLease(args.Key)
+	// Check whether the key is being granted lease(s). If so, revoke all of the leases
+	ss.mux.Lock()
+	if leases, ok := ss.keyToLeases[args.Key]; ok {
+		ss.mux.Unlock()
+		leases.updateLock.Lock()
+		leases.accessLock.Lock()
+		if len(leases.validLeases) > 0 {
+			leases.accessLock.Unlock()
+			defer leases.updateLock.Unlock()
+			ss.RevokeLease(args.Key, leases)
+		} else {
+			leases.accessLock.Unlock()
+			leases.updateLock.Unlock()
+		}
+	} else {
+		ss.mux.Unlock()
+	}
 
 	ss.putRequestChan <- *args
 	*reply = <-ss.putReplyChan
@@ -267,8 +342,23 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 		return nil
 	}
 
-	// Check whether the key is being revoked. If not, revoke the key
-	ss.RevokeLease(args.Key)
+	// Check whether the key is being granted lease(s). If so, revoke all of the leases
+	ss.mux.Lock()
+	if leases, ok := ss.keyToLeases[args.Key]; ok {
+		ss.mux.Unlock()
+		leases.updateLock.Lock()
+		leases.accessLock.Lock()
+		if len(leases.validLeases) > 0 {
+			leases.accessLock.Unlock()
+			defer leases.updateLock.Unlock()
+			ss.RevokeLease(args.Key, leases)
+		} else {
+			leases.accessLock.Unlock()
+			leases.updateLock.Unlock()
+		}
+	} else {
+		ss.mux.Unlock()
+	}
 
 	ss.appendListRequestChan <- *args
 	*reply = <-ss.appendListReplyChan
@@ -282,7 +372,23 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 	}
 
 	// Check whether the key is being revoked. If not, revoke the key
-	ss.RevokeLease(args.Key)
+	// Check whether the key is being granted lease(s). If so, revoke all of the leases
+	ss.mux.Lock()
+	if leases, ok := ss.keyToLeases[args.Key]; ok {
+		ss.mux.Unlock()
+		leases.updateLock.Lock()
+		leases.accessLock.Lock()
+		if len(leases.validLeases) > 0 {
+			leases.accessLock.Unlock()
+			defer leases.updateLock.Unlock()
+			ss.RevokeLease(args.Key, leases)
+		} else {
+			leases.accessLock.Unlock()
+			leases.updateLock.Unlock()
+		}
+	} else {
+		ss.mux.Unlock()
+	}
 
 	ss.removeListRequestChan <- *args
 	*reply = <-ss.removeListReplyChan
@@ -295,29 +401,26 @@ func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storage
 func (ss *storageServer) ValidateServer(key string) bool {
 	hashedKey := libstore.StoreHash(key)
 
-	candVirtualID := ss.virtualIDs[0]
-	for idx, curID := range ss.virtualIDs {
-		if idx == 0 {
-			continue
-		}
-		if curID > hashedKey {
-			candVirtualID = curID
+	var chosenServer = ""
+	// Find the proper server to serve this request. Since the virtual IDs are sorted in the storageServers list, break
+	// the loop once a virtual ID that is bigger than the hashed key is found
+	for _, serverInfo := range ss.flattenServers {
+		// Need to be <= rather than ==
+		if hashedKey <= serverInfo.virtualID {
+			chosenServer = serverInfo.hostPort
 			break
 		}
 	}
-
-	for _, serverInfo := range ss.allServers {
-		if serverInfo.HostPort == ss.myHostPort {
-			continue
-		}
-		for _, curID := range serverInfo.VirtualIDs {
-			if curID > hashedKey && curID < candVirtualID {
-				return false
-			}
-		}
+	// If the hashed key is bigger than every virtual ID, use the first simpleNode to serve this request
+	if len(chosenServer) == 0 {
+		chosenServer = ss.flattenServers[0].hostPort
 	}
 
-	return true
+	if chosenServer == ss.myHostPort {
+		return true
+	} else {
+		return false
+	}
 }
 
 //
@@ -335,31 +438,34 @@ func (ss *storageServer) MainRoutine() {
 				if args.WantLease {
 					ss.mux.Lock()
 					// If the key is being revoked, stop granting
-					if _, ok := ss.revokingKey[args.Key]; ok {
+					if _, ok := ss.beingRevokedKeys[args.Key]; ok {
+						ss.mux.Unlock()
 						reply.Lease.Granted = false
 					} else {
 						grant := true
-						if hostPorts, ok := ss.keyToLibstore[args.Key]; ok {
-							for _, hostPort := range hostPorts {
-								if hostPort == args.HostPort {
-									grant = false
-									reply.Lease.Granted = false
-									break
-								}
-							}
-						} else {
-							ss.keyToLibstore[args.Key] = nil
+						if _, ok := ss.keyToLeases[args.Key]; !ok {
+							ss.keyToLeases[args.Key] = &leasesInfo{}
+							ss.keyToLeases[args.Key].validLeases = make(map[string]leaseInfo)
 						}
+						leases := ss.keyToLeases[args.Key]
+						ss.mux.Unlock()
+
+						leases.accessLock.Lock()
+						if _, ok := leases.validLeases[args.HostPort]; ok {
+							grant = false
+							reply.Lease.Granted = false
+						}
+
 						if grant {
-							ss.keyToLibstore[args.Key] = append(ss.keyToLibstore[args.Key], args.HostPort)
 							reply.Lease.Granted = true
 							reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
 							timestamp := time.Now().UnixNano()
-							ss.leaseStartTime[args.Key] = timestamp
-							go ss.TimeoutRevoke(args.Key, timestamp, reply.Lease.ValidSeconds)
+							lease := leaseInfo{startTime: timestamp, validTime: storagerpc.LeaseSeconds}
+							leases.validLeases[args.HostPort] = lease
+							go ss.TimeoutRevoke(args.HostPort, args.Key, timestamp, reply.Lease.ValidSeconds)
 						}
+						leases.accessLock.Unlock()
 					}
-					ss.mux.Unlock()
 				}
 			} else {
 				reply.Status = storagerpc.KeyNotFound
@@ -383,31 +489,34 @@ func (ss *storageServer) MainRoutine() {
 				if args.WantLease {
 					ss.mux.Lock()
 					// If the key is being revoked, stop granting
-					if _, ok := ss.revokingKey[args.Key]; ok {
+					if _, ok := ss.beingRevokedKeys[args.Key]; ok {
+						ss.mux.Unlock()
 						reply.Lease.Granted = false
 					} else {
 						grant := true
-						if hostPorts, ok := ss.keyToLibstore[args.Key]; ok {
-							for _, hostPort := range hostPorts {
-								if hostPort == args.HostPort {
-									grant = false
-									reply.Lease.Granted = false
-									break
-								}
-							}
-						} else {
-							ss.keyToLibstore[args.Key] = nil
+						if _, ok := ss.keyToLeases[args.Key]; !ok {
+							ss.keyToLeases[args.Key] = &leasesInfo{}
+							ss.keyToLeases[args.Key].validLeases = make(map[string]leaseInfo)
 						}
+						leases := ss.keyToLeases[args.Key]
+						ss.mux.Unlock()
+
+						leases.accessLock.Lock()
+						if _, ok := leases.validLeases[args.HostPort]; ok {
+							grant = false
+							reply.Lease.Granted = false
+						}
+
 						if grant {
-							ss.keyToLibstore[args.Key] = append(ss.keyToLibstore[args.Key], args.HostPort)
 							reply.Lease.Granted = true
 							reply.Lease.ValidSeconds = storagerpc.LeaseSeconds
 							timestamp := time.Now().UnixNano()
-							ss.leaseStartTime[args.Key] = timestamp
-							go ss.TimeoutRevoke(args.Key, timestamp, reply.Lease.ValidSeconds)
+							lease := leaseInfo{startTime: timestamp, validTime: storagerpc.LeaseSeconds}
+							leases.validLeases[args.HostPort] = lease
+							go ss.TimeoutRevoke(args.HostPort, args.Key, timestamp, reply.Lease.ValidSeconds)
 						}
+						leases.accessLock.Unlock()
 					}
-					ss.mux.Unlock()
 				}
 			} else {
 				reply.Status = storagerpc.KeyNotFound
@@ -468,23 +577,18 @@ func (ss *storageServer) MainRoutine() {
 //
 // Handle timeout revoke for each granted lease
 //
-func (ss *storageServer) TimeoutRevoke(key string, startTime int64, validTime int) {
-	timer := time.NewTimer(time.Duration(validTime + storagerpc.LeaseGuardSeconds) * time.Second)
-	revokeLeaseFlag := false
+func (ss *storageServer) TimeoutRevoke(hostPort string, key string, startTime int64, validTime int) {
+	timer := time.NewTimer(time.Duration(validTime+storagerpc.LeaseGuardSeconds) * time.Second)
 	// Hang for a while
 	<-timer.C
 	ss.mux.Lock()
-	//fmt.Println("key", key)
-	//fmt.Println("start time", startTime)
-	//fmt.Println(ss.leaseStartTime)
-	if curStartTime, ok := ss.leaseStartTime[key]; ok {
-		if curStartTime == startTime {
-			revokeLeaseFlag = true
+	if leases, ok := ss.keyToLeases[key]; ok {
+		ss.mux.Unlock()
+		leases.accessLock.Lock()
+		if lease, ok := leases.validLeases[hostPort]; ok && lease.startTime == startTime {
+			delete(leases.validLeases, hostPort)
 		}
-	}
-	ss.mux.Unlock()
-	if revokeLeaseFlag {
-		ss.RevokeLease(key)
+		leases.accessLock.Unlock()
 	}
 }
 
@@ -492,66 +596,44 @@ func (ss *storageServer) TimeoutRevoke(key string, startTime int64, validTime in
 // Revoke all the leases associated with the same key. In the same time, block all the rpc calls that try to change the
 // value of the key
 //
-func (ss *storageServer) RevokeLease(key string) bool {
+func (ss *storageServer) RevokeLease(key string, leases *leasesInfo) {
 	ss.mux.Lock()
-	if _, ok := ss.keyToLock[key]; !ok {
-		ss.keyToLock[key] = &sync.Mutex{}
-	}
-	lockOnKey := ss.keyToLock[key]
-	if _, ok := ss.revokingKey[key]; !ok {
-		ss.revokingKey[key] = 1
-	} else {
-		ss.revokingKey[key]++
-	}
+	ss.beingRevokedKeys[key] = true
 	ss.mux.Unlock()
+	leases.accessLock.Lock()
+	for hostPort, _ := range leases.validLeases {
+		go SendRevokeLease(key, hostPort, leases)
+	}
+	leases.accessLock.Unlock()
 
-	revokeReplyChan := make(chan bool)
-	// Lock the key when revoke lease, so other modification RPC calls cannot proceed until all revoke lease finished
-	lockOnKey.Lock()
-	defer lockOnKey.Unlock()
-
-	totalCnt := 0
-	ss.mux.Lock()
-	if hostPorts, ok := ss.keyToLibstore[key]; ok {
-		for _, hostPort := range hostPorts {
-			totalCnt++
-			go SendRevokeLease(key, hostPort, revokeReplyChan)
+	exitLoopFlag := false
+	for !exitLoopFlag {
+		leases.accessLock.Lock()
+		curLen := len(leases.validLeases)
+		leases.accessLock.Unlock()
+		if curLen == 0 {
+			exitLoopFlag = true
 		}
-	}
-	ss.mux.Unlock()
-
-	currentCnt := 0
-	if totalCnt > 0 {
-		breakLoop := false
-		for !breakLoop {
-			select {
-			case <-revokeReplyChan:
-				currentCnt++
-				if currentCnt == totalCnt {
-					breakLoop = true
-				}
-			}
-		}
+		time.Sleep(time.Millisecond)
 	}
 
+	// Clear the lease metadata related to the key
+	leases.accessLock.Lock()
+	leases.validLeases = make(map[string]leaseInfo)
+	leases.accessLock.Unlock()
 	ss.mux.Lock()
-	if ss.revokingKey[key] == 1 {
-		delete(ss.revokingKey, key)
-	} else {
-		ss.revokingKey[key]--
-	}
-	// Always clear the keyToLibstore[key]
-	delete(ss.keyToLibstore, key)
+	delete(ss.beingRevokedKeys, key)
 	ss.mux.Unlock()
-	return true
 }
 
-func SendRevokeLease(key string, hostPort string, revokeReplyChan chan bool) {
+//
+// RPC call remote RevokeLease
+//
+func SendRevokeLease(key string, hostPort string, leases *leasesInfo) {
 	// TODO: May add cache for the client here
 	client, err := rpc.DialHTTP("tcp", hostPort)
 	if err != nil {
 		fmt.Println("Cannot contact the libstore!")
-		revokeReplyChan <- true
 		return
 	}
 
@@ -561,12 +643,14 @@ func SendRevokeLease(key string, hostPort string, revokeReplyChan chan bool) {
 
 	if err != nil {
 		fmt.Println("Error during RevokeLease RPC call!")
-		revokeReplyChan <- true
 		return
 	}
 
 	if reply.Status != storagerpc.OK && reply.Status != storagerpc.KeyNotFound {
 		fmt.Println("Unknown RevokeLease reply!")
 	}
-	revokeReplyChan <- true
+
+	leases.accessLock.Lock()
+	delete(leases.validLeases, hostPort)
+	leases.accessLock.Unlock()
 }
