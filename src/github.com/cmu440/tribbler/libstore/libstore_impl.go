@@ -22,9 +22,9 @@ type libstore struct {
 	hostToClient   map[string]*rpc.Client // Cache for the seen connections' clients
 
 	// Cache for the Libstore instance
-	stringCache map[string]string		  // Data cache for string value
-	listCache map[string][]string		  // Data cache for string slice value
-	requestTimeWindow	   map[string][]int64	  // Cache for each query's count
+	stringCache       map[string]string   // Data cache for string value
+	listCache         map[string][]string // Data cache for string slice value
+	requestTimeWindow map[string][]int64  // Cache for each query's count
 }
 
 // Simplified Node struct - Only store one virtual ID for a server
@@ -356,7 +356,7 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 					idx := 0
 					for idx < len(times) {
 						// TODO: > or >= here
-						if times[idx] + duration > curTimeStamp {
+						if times[idx]+duration > curTimeStamp {
 							break
 						}
 						idx++
