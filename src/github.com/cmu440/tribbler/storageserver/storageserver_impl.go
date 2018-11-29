@@ -633,7 +633,7 @@ func SendRevokeLease(key string, hostPort string, leases *leasesInfo) {
 	// TODO: May add cache for the client here
 	client, err := rpc.DialHTTP("tcp", hostPort)
 	if err != nil {
-		fmt.Println("Cannot contact the libstore!")
+		// fmt.Println("Cannot contact the libstore!")
 		return
 	}
 
@@ -642,7 +642,7 @@ func SendRevokeLease(key string, hostPort string, leases *leasesInfo) {
 	err = client.Call("LeaseCallbacks.RevokeLease", args, reply)
 
 	if err != nil {
-		fmt.Println("Error during RevokeLease RPC call!")
+		// fmt.Println("Error during RevokeLease RPC call!")
 		return
 	}
 
