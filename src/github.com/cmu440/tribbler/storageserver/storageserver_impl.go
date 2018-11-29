@@ -167,7 +167,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 		client, err := rpc.DialHTTP("tcp", masterServerHostPort)
 		// Handle initialization dial error
 		for err != nil {
-			time.Sleep(time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			client, err = rpc.DialHTTP("tcp", masterServerHostPort)
 		}
 
