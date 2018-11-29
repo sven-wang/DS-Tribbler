@@ -60,7 +60,10 @@ type simpleNode struct {
 func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libstore, error) {
 	ls := new(libstore)
 	// Libstore instance registers itself for RevokeLease RPC
-	rpc.RegisterName("LeaseCallbacks", librpc.Wrap(ls))
+	err := rpc.RegisterName("LeaseCallbacks", librpc.Wrap(ls))
+	if err != nil {
+		return nil, err
+	}
 	ls.mode = mode
 	ls.myHostPort = myHostPort
 	ls.hostToClient = make(map[string]*rpc.Client)
