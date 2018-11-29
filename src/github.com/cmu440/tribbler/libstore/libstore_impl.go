@@ -24,8 +24,6 @@ type libstore struct {
 	// Cache for the Libstore instance
 	stringCache map[string]string		  // Data cache for string value
 	listCache map[string][]string		  // Data cache for string slice value
-	leaseStartTime map[string]int64	      // Cache for each cached data's entry time
-	leaseValidTime map[string]int		  // Cache for each cached data's lease time
 	requestTimeWindow	   map[string][]int64	  // Cache for each query's count
 }
 
@@ -69,8 +67,6 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	if mode != Never {
 		ls.stringCache = make(map[string]string)
 		ls.listCache = make(map[string][]string)
-		ls.leaseStartTime = make(map[string]int64)
-		ls.leaseValidTime = make(map[string]int)
 		ls.requestTimeWindow = make(map[string][]int64)
 	}
 
@@ -138,7 +134,8 @@ func (ls *libstore) Get(key string) (string, error) {
 	} else {
 		// If the libstore instance is caching the value
 		ls.mux.Lock()
-		if val, ok := ls.stringCache[key]; ok {
+		if ls.CacheValidation(key) {
+			val := ls.stringCache[key]
 			ls.mux.Unlock()
 			return val, nil
 		}
@@ -159,10 +156,8 @@ func (ls *libstore) Get(key string) (string, error) {
 	if requestLease && reply.Lease.Granted {
 		ls.mux.Lock()
 		defer ls.mux.Unlock()
-
 		ls.stringCache[key] = reply.Value
-		ls.leaseStartTime[key] = time.Now().UnixNano()
-		ls.leaseValidTime[key] = reply.Lease.ValidSeconds
+		go ls.TimeoutRevoke(key, reply.Lease.ValidSeconds)
 	}
 
 	return reply.Value, nil
@@ -222,7 +217,8 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 	} else {
 		// If the libstore instance is caching the value
 		ls.mux.Lock()
-		if val, ok := ls.listCache[key]; ok {
+		if ls.CacheValidation(key) {
+			val := ls.listCache[key]
 			ls.mux.Unlock()
 			return val, nil
 		}
@@ -241,10 +237,8 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 		if requestLease && reply.Lease.Granted {
 			ls.mux.Lock()
 			defer ls.mux.Unlock()
-
 			ls.listCache[key] = reply.Value
-			ls.leaseStartTime[key] = time.Now().UnixNano()
-			ls.leaseValidTime[key] = reply.Lease.ValidSeconds
+			go ls.TimeoutRevoke(key, reply.Lease.ValidSeconds)
 		}
 		return reply.Value, nil
 	}
@@ -296,7 +290,7 @@ func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storage
 	ls.mux.Lock()
 	defer ls.mux.Unlock()
 
-	if _, ok := ls.leaseValidTime[args.Key]; !ok {
+	if !ls.CacheValidation(args.Key) {
 		reply.Status = storagerpc.KeyNotFound
 	} else {
 		ls.ClearCache(args.Key)
@@ -308,26 +302,13 @@ func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storage
 //
 // Handle timeout revoke for each granted lease
 //
-func (ls *libstore) TimeoutRevoke(key string, startTime int64, validTime int) {
-	timer := time.NewTimer(time.Duration(validTime + storagerpc.LeaseGuardSeconds) * time.Second)
-	revokeLeaseFlag := false
-	// Hang for a while
-	for {
-		select {
-		case <-timer.C:
-			ls.mux.Lock()
-			if curStartTime, ok := ls.leaseStartTime[key]; ok {
-				if curStartTime == startTime {
-					revokeLeaseFlag = true
-				}
-			}
-			ls.mux.Unlock()
-			break
-		}
-	}
-	if revokeLeaseFlag {
-		ls.mux.Lock()
-		defer ls.mux.Unlock()
+func (ls *libstore) TimeoutRevoke(key string, validTime int) {
+	timer := time.NewTimer(time.Duration(validTime) * time.Second)
+	<-timer.C
+	ls.mux.Lock()
+	defer ls.mux.Unlock()
+
+	if ls.CacheValidation(key) {
 		ls.ClearCache(key)
 	}
 }
@@ -361,21 +342,9 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 	requestLease := false
 	if ls.mode != Never {
 		curTimeStamp := time.Now().UnixNano()
-		checkLeaseRequirement := true
-		// If this key has been cached, check whether it is still valid
-		if startTime, ok := ls.leaseStartTime[key]; ok {
-			// If the cache is outdated
-			// TODO: > or >= here
-			if int(curTimeStamp - startTime) > ls.leaseValidTime[key] {
-				// Delete the outdated cache
-				ls.ClearCache(key)
-			} else {
-				// If the cache is still valid
-				checkLeaseRequirement = false
-			}
-		}
+		duration := int64(storagerpc.QueryCacheSeconds) * 1e9
 		// If it is necessary to check the requirement of lease
-		if checkLeaseRequirement {
+		if !ls.CacheValidation(key) {
 			if ls.mode == Always {
 				requestLease = true
 			} else if ls.mode == Normal {
@@ -384,7 +353,7 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 					idx := 0
 					for idx < len(times) {
 						// TODO: > or >= here
-						if times[idx] + storagerpc.QueryCacheSeconds > curTimeStamp {
+						if times[idx] + duration > curTimeStamp {
 							break
 						}
 						idx++
@@ -428,6 +397,17 @@ func (ls *libstore) RouteServer(key string) (*rpc.Client, bool, error) {
 func (ls *libstore) ClearCache(key string) {
 	delete(ls.stringCache, key)
 	delete(ls.listCache, key)
-	delete(ls.leaseStartTime, key)
-	delete(ls.leaseValidTime, key)
+}
+
+//
+// Check whether the key is cached at present
+//
+func (ls *libstore) CacheValidation(key string) bool {
+	if _, ok := ls.listCache[key]; ok {
+		return true
+	}
+	if _, ok := ls.stringCache[key]; ok {
+		return true
+	}
+	return false
 }
